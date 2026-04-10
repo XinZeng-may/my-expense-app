@@ -994,28 +994,63 @@ with tab2:
 
             st.dataframe(card_summary, use_container_width=True, hide_index=True)
 
-        st.markdown("### 月度流出趋势")
-        trend_df = cash_df.copy()
-        trend_df["月份"] = trend_df["expense_date"].dt.to_period("M").astype(str)
-        trend_summary = (
-            trend_df.groupby(["月份", "payment_method"], as_index=False)["adjusted_amount"]
-            .sum()
-            .rename(columns={"adjusted_amount": "金额"})
+st.markdown("### 已实际流出（月度汇总）")
+
+actual_outflow_df = cash_df[cash_df["payment_method"] != "信用卡"].copy()
+
+if actual_outflow_df.empty:
+    st.info("当前没有已实际流出记录。")
+else:
+    actual_outflow_df["月份"] = actual_outflow_df["expense_date"].dt.to_period("M").astype(str)
+
+    actual_monthly_summary = (
+        actual_outflow_df.groupby("月份", as_index=False)["adjusted_amount"]
+        .sum()
+        .sort_values("月份", ascending=False)
+        .rename(columns={"adjusted_amount": "已实际流出金额"})
+    )
+
+    st.dataframe(actual_monthly_summary, use_container_width=True, hide_index=True)
+
+st.markdown("### 信用卡待还（当前欠款汇总）")
+
+credit_outstanding_df = cash_df[cash_df["payment_method"] == "信用卡"].copy()
+
+if credit_outstanding_df.empty:
+    st.info("当前没有信用卡待还记录。")
+else:
+    credit_bill_summary = (
+        credit_outstanding_df.groupby("card_name", as_index=False)["adjusted_amount"]
+        .sum()
+        .sort_values("adjusted_amount", ascending=False)
+        .rename(columns={"card_name": "信用卡", "adjusted_amount": "当前待还金额"})
+    )
+
+    if not cards_df.empty:
+        credit_bill_summary = credit_bill_summary.merge(
+            cards_df[["card_name", "owner_name", "payment_due_day", "cashback_rate"]],
+            left_on="信用卡",
+            right_on="card_name",
+            how="left",
         )
 
-        if not trend_summary.empty:
-            trend_chart = (
-                alt.Chart(trend_summary)
-                .mark_bar()
-                .encode(
-                    x=alt.X("月份:N", title="月份"),
-                    y=alt.Y("金额:Q", title="金额"),
-                    color=alt.Color("payment_method:N", title="支付方式"),
-                    tooltip=["月份", "payment_method", alt.Tooltip("金额:Q", format=".2f")],
-                )
-                .properties(height=360)
-            )
-            st.altair_chart(trend_chart, use_container_width=True)
+        credit_bill_summary["预计cashback"] = (
+            credit_bill_summary["当前待还金额"] * credit_bill_summary["cashback_rate"].fillna(0)
+        )
+
+        credit_bill_summary = credit_bill_summary.rename(
+            columns={
+                "owner_name": "属于谁",
+                "payment_due_day": "每月还款日",
+                "cashback_rate": "cashback比例",
+            }
+        )
+
+        credit_bill_summary = credit_bill_summary[
+            ["信用卡", "当前待还金额", "属于谁", "每月还款日", "cashback比例", "预计cashback"]
+        ]
+
+    st.dataframe(credit_bill_summary, use_container_width=True, hide_index=True)       
 
 with tab3:
     st.subheader("💳 信用卡管理")
