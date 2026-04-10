@@ -125,7 +125,25 @@ def init_supabase() -> Client:
 
 supabase = init_supabase()
 
+def format_money(x) -> str:
+    try:
+        return f"¥{float(x):,.2f}"
+    except Exception:
+        return "¥0.00"
 
+
+def format_rate(x) -> str:
+    try:
+        return f"{float(x) * 100:.1f}%"
+    except Exception:
+        return "0.0%"
+
+
+def format_date_str(x) -> str:
+    try:
+        return pd.to_datetime(x).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
 def load_users() -> pd.DataFrame:
     response = supabase.table("users").select("*").order("created_at").execute()
     return pd.DataFrame(response.data or [])
@@ -894,7 +912,7 @@ st.markdown(
     """
 <div class='top-banner'>
   <p class='top-title'>💸 情侣记账本</p>
-  <p class='top-subtitle'>帮助情侣/小家庭快速记账，查看共同与个人支出。</p>
+  <p class='top-subtitle'>快速记账、查看现金流、管理信用卡待还与返现。</p>
 </div>
 """,
     unsafe_allow_html=True,
