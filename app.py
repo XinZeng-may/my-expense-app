@@ -848,9 +848,24 @@ with tab2:
     else:
         cash_df = filtered_df.copy()
 
-        actual_cash_out = cash_df[cash_df["payment_method"] != "信用卡"]["amount"].sum()
+        # 关键修复：现金流口径和 Tab1 一致
+        # 全部用户 => 全额
+        # 单个用户 => 个人全额 + 共同/2
+        if selected_user_filter == "全部":
+            cash_df["adjusted_amount"] = cash_df["amount"]
+        else:
+            cash_df["adjusted_amount"] = cash_df["amount"]
+            cash_df.loc[cash_df["bill_type"] == "共同", "adjusted_amount"] = (
+                cash_df.loc[cash_df["bill_type"] == "共同", "amount"] / 2
+            )
+
+        # 非信用卡 = 已实际流出
+        actual_cash_out = cash_df[cash_df["payment_method"] != "信用卡"]["adjusted_amount"].sum()
+
+        # 信用卡 = 待还
         credit_df = cash_df[cash_df["payment_method"] == "信用卡"].copy()
-        pending_card_payment = credit_df["amount"].sum() if not credit_df.empty else 0.0
+        pending_card_payment = credit_df["adjusted_amount"].sum() if not credit_df.empty else 0.0
+
         total_outflow_view = actual_cash_out + pending_card_payment
 
         c1, c2, c3 = st.columns(3)
@@ -869,10 +884,10 @@ with tab2:
 
         st.markdown("### 按支付方式统计")
         payment_summary = (
-            cash_df.groupby("payment_method", as_index=False)["amount"]
+            cash_df.groupby("payment_method", as_index=False)["adjusted_amount"]
             .sum()
-            .sort_values("amount", ascending=False)
-            .rename(columns={"payment_method": "支付方式", "amount": "金额"})
+            .sort_values("adjusted_amount", ascending=False)
+            .rename(columns={"payment_method": "支付方式", "adjusted_amount": "金额"})
         )
         st.dataframe(payment_summary, use_container_width=True, hide_index=True)
 
@@ -881,9 +896,9 @@ with tab2:
             st.info("当前没有信用卡消费记录。")
         else:
             card_summary = (
-                credit_df.groupby("card_name", as_index=False)["amount"]
+                credit_df.groupby("card_name", as_index=False)["adjusted_amount"]
                 .sum()
-                .rename(columns={"card_name": "card_name", "amount": "待还金额"})
+                .rename(columns={"card_name": "card_name", "adjusted_amount": "待还金额"})
                 .sort_values("待还金额", ascending=False)
             )
 
@@ -913,9 +928,9 @@ with tab2:
         trend_df = cash_df.copy()
         trend_df["月份"] = trend_df["expense_date"].dt.to_period("M").astype(str)
         trend_summary = (
-            trend_df.groupby(["月份", "payment_method"], as_index=False)["amount"]
+            trend_df.groupby(["月份", "payment_method"], as_index=False)["adjusted_amount"]
             .sum()
-            .rename(columns={"amount": "金额"})
+            .rename(columns={"adjusted_amount": "金额"})
         )
 
         if not trend_summary.empty:
