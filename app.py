@@ -618,7 +618,7 @@ s4.markdown(
     f"<div class='stat-card'><div class='stat-label'>记录数</div><div class='stat-value'>{record_count}</div></div>",
     unsafe_allow_html=True,
 )
-    st.subheader("📁 分类汇总区")
+st.subheader("📁 分类汇总区")
     if filtered_df.empty:
         st.info("当前筛选条件下暂无数据。")
     else:
