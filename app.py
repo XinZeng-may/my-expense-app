@@ -126,6 +126,7 @@ def add_sub_category(parent_category: str, sub_category: str) -> str:
 
 def ensure_expense_columns(df: pd.DataFrame) -> pd.DataFrame:
     expected_defaults = {
+        "id": 0,
         "expense_date": pd.NaT,
         "amount": 0.0,
         "user_id": 0,
@@ -149,6 +150,7 @@ def ensure_expense_columns(df: pd.DataFrame) -> pd.DataFrame:
     normalized.loc[~normalized["parent_category"].isin(FIXED_PARENT_CATEGORIES), "parent_category"] = "其他"
 
     normalized["sub_category"] = normalized["sub_category"].fillna("未分类").astype(str)
+    normalized["id"] = pd.to_numeric(normalized["id"], errors="coerce").fillna(0).astype(int)
     normalized["user_id"] = pd.to_numeric(normalized["user_id"], errors="coerce").fillna(0).astype(int)
     normalized["user_name"] = normalized["user_name"].fillna("").astype(str)
     normalized["note"] = normalized["note"].fillna("").astype(str)
@@ -157,6 +159,16 @@ def ensure_expense_columns(df: pd.DataFrame) -> pd.DataFrame:
     normalized["expense_date"] = pd.to_datetime(normalized["expense_date"], errors="coerce")
 
     return normalized
+
+
+def delete_expense_record(expense_id: int) -> str:
+    if expense_id <= 0:
+        return "删除失败：无效的记录ID。"
+    try:
+        supabase.table("expenses").delete().eq("id", int(expense_id)).execute()
+        return "ok"
+    except Exception as e:
+        return f"删除失败：{e}"
 
 
 def add_expense_record(
@@ -272,6 +284,16 @@ with st.sidebar:
     user_filter_options = ["全部"] + users_df["name"].tolist() if not users_df.empty else ["全部"]
     selected_user_filter = st.selectbox("按用户", user_filter_options)
     selected_bill_filter = st.selectbox("按账单类型", ["全部", "个人", "共同"])
+    selected_parent_filter = st.selectbox("按一级分类", ["全部"] + FIXED_PARENT_CATEGORIES)
+
+    if selected_parent_filter == "全部":
+        sub_filter_options = ["全部"]
+        if not categories_df.empty:
+            sub_filter_options += sorted(categories_df["sub_category"].dropna().unique().tolist())
+    else:
+        sub_filter_df = categories_df[categories_df["parent_category"] == selected_parent_filter]
+        sub_filter_options = ["全部"] + sorted(sub_filter_df["sub_category"].dropna().unique().tolist())
+    selected_sub_filter = st.selectbox("按二级分类", sub_filter_options)
 
     min_day = date(2020, 1, 1)
     max_day = date.today()
@@ -358,6 +380,10 @@ if selected_user_filter != "全部":
     filtered_df = filtered_df[filtered_df["user_name"] == selected_user_filter]
 if selected_bill_filter != "全部":
     filtered_df = filtered_df[filtered_df["bill_type"] == selected_bill_filter]
+if selected_parent_filter != "全部":
+    filtered_df = filtered_df[filtered_df["parent_category"] == selected_parent_filter]
+if selected_sub_filter != "全部":
+    filtered_df = filtered_df[filtered_df["sub_category"] == selected_sub_filter]
 
 if isinstance(date_range, tuple) and len(date_range) == 2:
     start_day, end_day = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
@@ -410,9 +436,43 @@ st.subheader("🧾 记录表格区")
 if filtered_df.empty:
     st.info("当前筛选条件下暂无记录。")
 else:
+    st.markdown("#### 🗑️ 删除记录")
+    delete_options_df = filtered_df.sort_values(["expense_date", "id"], ascending=[False, False]).copy()
+    delete_options_df["expense_date_str"] = delete_options_df["expense_date"].dt.strftime("%Y-%m-%d")
+    delete_options_df["delete_label"] = (
+        "ID:"
+        + delete_options_df["id"].astype(str)
+        + " | "
+        + delete_options_df["expense_date_str"].astype(str)
+        + " | "
+        + delete_options_df["user_name"].astype(str)
+        + " | "
+        + delete_options_df["parent_category"].astype(str)
+        + "-"
+        + delete_options_df["sub_category"].astype(str)
+        + " | ¥"
+        + delete_options_df["amount"].map(lambda x: f"{x:,.2f}")
+    )
+    selected_delete_label = st.selectbox("选择要删除的记录", delete_options_df["delete_label"].tolist())
+    selected_delete_id = int(
+        delete_options_df.loc[delete_options_df["delete_label"] == selected_delete_label, "id"].iloc[0]
+    )
+    confirm_delete = st.checkbox("我确认要删除这条记录（不可恢复）", value=False)
+    if st.button("删除选中记录", use_container_width=True):
+        if not confirm_delete:
+            st.warning("请先勾选确认删除。")
+        else:
+            delete_result = delete_expense_record(selected_delete_id)
+            if delete_result == "ok":
+                st.success("记录已删除。")
+                st.rerun()
+            else:
+                st.error(delete_result)
+
     show_df = filtered_df[
         [
             "expense_date",
+            "id",
             "user_name",
             "bill_type",
             "parent_category",
@@ -427,6 +487,7 @@ else:
     show_df = show_df.rename(
         columns={
             "expense_date": "日期",
+            "id": "ID",
             "user_name": "用户",
             "bill_type": "类型",
             "parent_category": "一级分类",
