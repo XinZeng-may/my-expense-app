@@ -1,5 +1,6 @@
 from datetime import date
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 from supabase import Client, create_client
@@ -171,6 +172,13 @@ def delete_expense_record(expense_id: int) -> str:
         return f"删除失败：{e}"
 
 
+def get_sub_options_for_parent(df: pd.DataFrame, parent_category: str) -> list[str]:
+    if df.empty:
+        return []
+    sub_df = df[df["parent_category"] == parent_category]
+    return sorted(sub_df["sub_category"].dropna().unique().tolist())
+
+
 def add_expense_record(
     expense_date: date,
     amount: float,
@@ -284,16 +292,18 @@ with st.sidebar:
     user_filter_options = ["全部"] + users_df["name"].tolist() if not users_df.empty else ["全部"]
     selected_user_filter = st.selectbox("按用户", user_filter_options)
     selected_bill_filter = st.selectbox("按账单类型", ["全部", "个人", "共同"])
-    selected_parent_filter = st.selectbox("按一级分类", ["全部"] + FIXED_PARENT_CATEGORIES)
+    selected_parent_filter = st.selectbox("按一级分类", ["全部"] + FIXED_PARENT_CATEGORIES, key="filter_parent")
 
     if selected_parent_filter == "全部":
         sub_filter_options = ["全部"]
         if not categories_df.empty:
             sub_filter_options += sorted(categories_df["sub_category"].dropna().unique().tolist())
     else:
-        sub_filter_df = categories_df[categories_df["parent_category"] == selected_parent_filter]
-        sub_filter_options = ["全部"] + sorted(sub_filter_df["sub_category"].dropna().unique().tolist())
-    selected_sub_filter = st.selectbox("按二级分类", sub_filter_options)
+        sub_filter_options = ["全部"] + get_sub_options_for_parent(categories_df, selected_parent_filter)
+    filter_sub_key = f"filter_sub_{selected_parent_filter}"
+    if st.session_state.get(filter_sub_key) not in sub_filter_options:
+        st.session_state[filter_sub_key] = "全部"
+    selected_sub_filter = st.selectbox("按二级分类", sub_filter_options, key=filter_sub_key)
 
     min_day = date(2020, 1, 1)
     max_day = date.today()
@@ -314,40 +324,40 @@ if categories_df.empty:
 # 中间添加记录表单
 st.markdown("<div class='panel'>", unsafe_allow_html=True)
 st.subheader("➕ 添加记录")
-st.caption("金额必须 ≥ 0；二级分类会随一级分类联动。保存后自动写入 Supabase 并刷新。")
+st.caption("金额必须 ≥ 0；二级分类会随一级分类实时联动。保存后自动写入 Supabase 并刷新。")
 
-with st.form("add_expense_form", clear_on_submit=True):
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        selected_date = st.date_input("日期", value=date.today())
-    with col2:
-        amount = st.number_input("金额", min_value=0.0, step=1.0, format="%.2f")
-    with col3:
-        user_options = users_df[["id", "name"]].dropna().copy()
-        user_options["id"] = pd.to_numeric(user_options["id"], errors="coerce").fillna(0).astype(int)
-        user_options = user_options[user_options["id"] > 0]
-        selected_user_name = st.selectbox("记账用户", user_options["name"].tolist())
-        selected_user_id = int(user_options[user_options["name"] == selected_user_name]["id"].iloc[0])
+col1, col2, col3 = st.columns(3)
+with col1:
+    selected_date = st.date_input("日期", value=date.today(), key="main_date")
+with col2:
+    amount = st.number_input("金额", min_value=0.0, step=1.0, format="%.2f", key="main_amount")
+with col3:
+    user_options = users_df[["id", "name"]].dropna().copy()
+    user_options["id"] = pd.to_numeric(user_options["id"], errors="coerce").fillna(0).astype(int)
+    user_options = user_options[user_options["id"] > 0]
+    selected_user_name = st.selectbox("记账用户", user_options["name"].tolist(), key="main_user_name")
+    selected_user_id = int(user_options[user_options["name"] == selected_user_name]["id"].iloc[0])
 
-    col4, col5, col6 = st.columns(3)
-    with col4:
-        selected_bill_type = st.selectbox("账单类型", ["个人", "共同"])
-    with col5:
-        selected_parent = st.selectbox("一级分类（固定）", FIXED_PARENT_CATEGORIES)
+col4, col5, col6 = st.columns(3)
+with col4:
+    selected_bill_type = st.selectbox("账单类型", ["个人", "共同"], key="main_bill_type")
+with col5:
+    selected_parent = st.selectbox("一级分类（固定）", FIXED_PARENT_CATEGORIES, key="main_parent")
 
-    sub_options_df = categories_df[categories_df["parent_category"] == selected_parent]
-    sub_options = sub_options_df["sub_category"].dropna().tolist()
-    sub_options = sorted(list(dict.fromkeys(sub_options)))
+sub_options = get_sub_options_for_parent(categories_df, selected_parent)
+main_sub_key = f"main_sub_{selected_parent}"
+if st.session_state.get(main_sub_key) not in sub_options and sub_options:
+    st.session_state[main_sub_key] = sub_options[0]
 
-    with col6:
-        if sub_options:
-            selected_sub = st.selectbox("二级分类", sub_options)
-        else:
-            selected_sub = ""
-            st.warning("该一级分类下没有二级分类，请先在左侧添加。")
+with col6:
+    if sub_options:
+        selected_sub = st.selectbox("二级分类", sub_options, key=main_sub_key)
+    else:
+        selected_sub = ""
+        st.warning("该一级分类下没有二级分类，请先在左侧添加。")
 
-    note = st.text_input("备注", placeholder="例如：午餐AA / Costco补货")
-    submitted_expense = st.form_submit_button("保存记录", use_container_width=True)
+note = st.text_input("备注", placeholder="例如：午餐AA / Costco补货", key="main_note")
+submitted_expense = st.button("保存记录", use_container_width=True)
 
 if submitted_expense:
     result = add_expense_record(
@@ -400,7 +410,9 @@ personal_amount = (
 shared_amount = (
     filtered_df[filtered_df["bill_type"] == "共同"]["amount"].sum() if not filtered_df.empty else 0.0
 )
+personal_kpi_amount = personal_amount + (shared_amount / 2)
 record_count = len(filtered_df)
+user_count = max(len(users_df), 1)
 
 s1, s2, s3, s4 = st.columns(4)
 s1.markdown(
@@ -408,7 +420,7 @@ s1.markdown(
     unsafe_allow_html=True,
 )
 s2.markdown(
-    f"<div class='stat-card'><div class='stat-label'>个人支出</div><div class='stat-value'>¥{personal_amount:,.2f}</div></div>",
+    f"<div class='stat-card'><div class='stat-label'>个人支出(个人+共同/2)</div><div class='stat-value'>¥{personal_kpi_amount:,.2f}</div></div>",
     unsafe_allow_html=True,
 )
 s3.markdown(
@@ -419,6 +431,43 @@ s4.markdown(
     f"<div class='stat-card'><div class='stat-label'>记录数</div><div class='stat-value'>{record_count}</div></div>",
     unsafe_allow_html=True,
 )
+
+st.subheader("👥 个人应承担支出")
+if selected_user_filter != "全部":
+    selected_user_personal = (
+        filtered_df[
+            (filtered_df["user_name"] == selected_user_filter) & (filtered_df["bill_type"] == "个人")
+        ]["amount"].sum()
+        if not filtered_df.empty
+        else 0.0
+    )
+    selected_user_shared_part = shared_amount / user_count
+    selected_user_payable = selected_user_personal + selected_user_shared_part
+    p1, p2, p3 = st.columns(3)
+    p1.metric("该用户个人支出", f"¥{selected_user_personal:,.2f}")
+    p2.metric("共同支出平摊", f"¥{selected_user_shared_part:,.2f}")
+    p3.metric("该用户应承担", f"¥{selected_user_payable:,.2f}")
+else:
+    st.caption("当前是“全部用户”，下表展示每位用户的应承担金额。")
+
+allocation_rows = []
+for uname in users_df["name"].tolist():
+    uname_personal = (
+        filtered_df[(filtered_df["user_name"] == uname) & (filtered_df["bill_type"] == "个人")]["amount"].sum()
+        if not filtered_df.empty
+        else 0.0
+    )
+    uname_shared = shared_amount / user_count
+    allocation_rows.append(
+        {
+            "用户": uname,
+            "个人支出": round(float(uname_personal), 2),
+            "共同平摊": round(float(uname_shared), 2),
+            "应承担总额": round(float(uname_personal + uname_shared), 2),
+        }
+    )
+allocation_df = pd.DataFrame(allocation_rows).sort_values("应承担总额", ascending=False)
+st.dataframe(allocation_df, use_container_width=True, hide_index=True)
 
 st.subheader("📁 分类汇总区")
 if filtered_df.empty:
@@ -432,43 +481,51 @@ else:
     )
     st.dataframe(category_summary, use_container_width=True, hide_index=True)
 
+st.subheader("📈 可视化统计（饼图）")
+if filtered_df.empty:
+    st.info("当前筛选条件下暂无可视化数据。")
+else:
+    chart_parent_options = sorted(filtered_df["parent_category"].dropna().unique().tolist())
+    selected_chart_parents = st.multiselect(
+        "选择要显示的一级分类（可多选）",
+        options=chart_parent_options,
+        default=chart_parent_options,
+    )
+    chart_df = filtered_df[filtered_df["parent_category"].isin(selected_chart_parents)].copy()
+    if chart_df.empty:
+        st.info("你当前没有选择任何一级分类。")
+    else:
+        chart_summary = (
+            chart_df.groupby(["parent_category", "sub_category"], as_index=False)["amount"]
+            .sum()
+            .sort_values("amount", ascending=False)
+        )
+        pie = (
+            alt.Chart(chart_summary)
+            .mark_arc(innerRadius=40)
+            .encode(
+                color=alt.Color("parent_category:N", title="一级分类"),
+                tooltip=["parent_category", "sub_category", alt.Tooltip("amount:Q", format=".2f")],
+                theta=alt.Theta("amount:Q", title="金额"),
+            )
+            .properties(height=360)
+            .interactive()
+        )
+        labels = (
+            alt.Chart(chart_summary)
+            .mark_text(radius=135, size=12)
+            .encode(
+                theta=alt.Theta("amount:Q"),
+                text=alt.Text("amount:Q", format=".1f"),
+                color=alt.value("#334155"),
+            )
+        )
+        st.altair_chart((pie + labels), use_container_width=True)
+
 st.subheader("🧾 记录表格区")
 if filtered_df.empty:
     st.info("当前筛选条件下暂无记录。")
 else:
-    st.markdown("#### 🗑️ 删除记录")
-    delete_options_df = filtered_df.sort_values(["expense_date", "id"], ascending=[False, False]).copy()
-    delete_options_df["expense_date_str"] = delete_options_df["expense_date"].dt.strftime("%Y-%m-%d")
-    delete_options_df["delete_label"] = (
-        "ID:"
-        + delete_options_df["id"].astype(str)
-        + " | "
-        + delete_options_df["expense_date_str"].astype(str)
-        + " | "
-        + delete_options_df["user_name"].astype(str)
-        + " | "
-        + delete_options_df["parent_category"].astype(str)
-        + "-"
-        + delete_options_df["sub_category"].astype(str)
-        + " | ¥"
-        + delete_options_df["amount"].map(lambda x: f"{x:,.2f}")
-    )
-    selected_delete_label = st.selectbox("选择要删除的记录", delete_options_df["delete_label"].tolist())
-    selected_delete_id = int(
-        delete_options_df.loc[delete_options_df["delete_label"] == selected_delete_label, "id"].iloc[0]
-    )
-    confirm_delete = st.checkbox("我确认要删除这条记录（不可恢复）", value=False)
-    if st.button("删除选中记录", use_container_width=True):
-        if not confirm_delete:
-            st.warning("请先勾选确认删除。")
-        else:
-            delete_result = delete_expense_record(selected_delete_id)
-            if delete_result == "ok":
-                st.success("记录已删除。")
-                st.rerun()
-            else:
-                st.error(delete_result)
-
     show_df = filtered_df[
         [
             "expense_date",
@@ -498,3 +555,36 @@ else:
         }
     )
     st.dataframe(show_df, use_container_width=True, hide_index=True)
+
+    with st.expander("🗑️ 删除记录（可选）", expanded=False):
+        delete_options_df = filtered_df.sort_values(["expense_date", "id"], ascending=[False, False]).copy()
+        delete_options_df["expense_date_str"] = delete_options_df["expense_date"].dt.strftime("%Y-%m-%d")
+        delete_options_df["delete_label"] = (
+            "ID:"
+            + delete_options_df["id"].astype(str)
+            + " | "
+            + delete_options_df["expense_date_str"].astype(str)
+            + " | "
+            + delete_options_df["user_name"].astype(str)
+            + " | "
+            + delete_options_df["parent_category"].astype(str)
+            + "-"
+            + delete_options_df["sub_category"].astype(str)
+            + " | ¥"
+            + delete_options_df["amount"].map(lambda x: f"{x:,.2f}")
+        )
+        selected_delete_label = st.selectbox("选择要删除的记录", delete_options_df["delete_label"].tolist())
+        selected_delete_id = int(
+            delete_options_df.loc[delete_options_df["delete_label"] == selected_delete_label, "id"].iloc[0]
+        )
+        confirm_delete = st.checkbox("我确认要删除这条记录（不可恢复）", value=False)
+        if st.button("删除选中记录", use_container_width=True):
+            if not confirm_delete:
+                st.warning("请先勾选确认删除。")
+            else:
+                delete_result = delete_expense_record(selected_delete_id)
+                if delete_result == "ok":
+                    st.success("记录已删除。")
+                    st.rerun()
+                else:
+                    st.error(delete_result)
