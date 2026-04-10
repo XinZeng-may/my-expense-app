@@ -1323,6 +1323,13 @@ with tab1:
                         except Exception as e:
                             st.error(f"修改失败：{e}")
 with tab2:
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+    range_start = pd.to_datetime(date_range[0]).date()
+    range_end = pd.to_datetime(date_range[1]).date()
+    else:
+    today = date.today()
+    range_start = today.replace(day=1)
+    range_end = today
     st.markdown("### 💳 手动记录信用卡还款")
     
     active_card_names = cards_df[cards_df["is_active"] == True]["card_name"].dropna().unique().tolist() if not cards_df.empty else []
@@ -1478,15 +1485,17 @@ with tab2:
                     cash_source_df.loc[cash_source_df["bill_type"] == "共同", "amount"] / 2
                 )
 
-        # ===== 直接支付：消费日就是现金流日 =====
-        direct_outflow_all = cash_source_df[cash_source_df["payment_method"] != "信用卡"].copy()
-        if not direct_outflow_all.empty:
-            direct_outflow_all["event_date"] = pd.to_datetime(direct_outflow_all["expense_date"]).dt.date
+# ===== 直接支付：消费日就是现金流日 =====
+direct_outflow_all = cash_source_df[cash_source_df["payment_method"] != "信用卡"].copy()
 
-        direct_outflow_in_range = direct_outflow_all[
-            (direct_outflow_all["event_date"] >= range_start)
-            & (direct_outflow_all["event_date"] <= range_end)
-        ].copy() if not direct_outflow_all.empty else pd.DataFrame()
+if direct_outflow_all.empty:
+    direct_outflow_in_range = pd.DataFrame()
+else:
+    direct_outflow_all["event_date"] = pd.to_datetime(direct_outflow_all["expense_date"]).dt.date
+    direct_outflow_in_range = direct_outflow_all[
+        (direct_outflow_all["event_date"] >= range_start)
+        & (direct_outflow_all["event_date"] <= range_end)
+    ].copy()
 
         # ===== 信用卡：按还款日自动算入现金流 =====
         credit_due_all = generate_credit_due_schedule(cash_source_df, cards_df)
