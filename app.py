@@ -86,12 +86,15 @@ def add_user(name: str) -> str:
     if not cleaned:
         return "用户名称不能为空。"
 
-    existing = supabase.table("users").select("id").eq("name", cleaned).limit(1).execute()
-    if existing.data:
-        return "该用户已存在。"
+    try:
+        existing = supabase.table("users").select("id").eq("name", cleaned).limit(1).execute()
+        if existing.data:
+            return "该用户已存在。"
 
-    supabase.table("users").insert({"name": cleaned}).execute()
-    return "ok"
+        supabase.table("users").insert({"name": cleaned}).execute()
+        return "ok"
+    except Exception as e:
+        return f"保存用户失败：{e}"
 
 
 def add_sub_category(parent_category: str, sub_category: str) -> str:
@@ -103,24 +106,63 @@ def add_sub_category(parent_category: str, sub_category: str) -> str:
     if not sub:
         return "二级分类名称不能为空。"
 
-    existing = (
-        supabase.table("categories")
-        .select("id")
-        .eq("parent_category", parent)
-        .eq("sub_category", sub)
-        .limit(1)
-        .execute()
-    )
-    if existing.data:
-        return "该二级分类已存在。"
+    try:
+        existing = (
+            supabase.table("categories")
+            .select("id")
+            .eq("parent_category", parent)
+            .eq("sub_category", sub)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            return "该二级分类已存在。"
 
-    supabase.table("categories").insert({"parent_category": parent, "sub_category": sub}).execute()
-    return "ok"
+        supabase.table("categories").insert({"parent_category": parent, "sub_category": sub}).execute()
+        return "ok"
+    except Exception as e:
+        return f"保存二级分类失败：{e}"
+
+
+def ensure_expense_columns(df: pd.DataFrame) -> pd.DataFrame:
+    expected_defaults = {
+        "expense_date": pd.NaT,
+        "amount": 0.0,
+        "user_id": 0,
+        "user_name": "",
+        "bill_type": "个人",
+        "parent_category": "其他",
+        "sub_category": "未分类",
+        "note": "",
+        "created_at": "",
+    }
+
+    normalized = df.copy()
+    for col, default in expected_defaults.items():
+        if col not in normalized.columns:
+            normalized[col] = default
+
+    normalized["bill_type"] = normalized["bill_type"].fillna("个人").astype(str)
+    normalized.loc[~normalized["bill_type"].isin(["个人", "共同"]), "bill_type"] = "个人"
+
+    normalized["parent_category"] = normalized["parent_category"].fillna("其他").astype(str)
+    normalized.loc[~normalized["parent_category"].isin(FIXED_PARENT_CATEGORIES), "parent_category"] = "其他"
+
+    normalized["sub_category"] = normalized["sub_category"].fillna("未分类").astype(str)
+    normalized["user_id"] = pd.to_numeric(normalized["user_id"], errors="coerce").fillna(0).astype(int)
+    normalized["user_name"] = normalized["user_name"].fillna("").astype(str)
+    normalized["note"] = normalized["note"].fillna("").astype(str)
+
+    normalized["amount"] = pd.to_numeric(normalized["amount"], errors="coerce").fillna(0.0)
+    normalized["expense_date"] = pd.to_datetime(normalized["expense_date"], errors="coerce")
+
+    return normalized
 
 
 def add_expense_record(
     expense_date: date,
     amount: float,
+    user_id: int,
     user_name: str,
     bill_type: str,
     parent_category: str,
@@ -129,6 +171,8 @@ def add_expense_record(
 ) -> str:
     if amount < 0:
         return "金额必须大于等于 0。"
+    if user_id <= 0:
+        return "用户ID无效，请重新选择用户。"
     if bill_type not in ["个人", "共同"]:
         return "账单类型不合法。"
     if parent_category not in FIXED_PARENT_CATEGORIES:
@@ -136,18 +180,46 @@ def add_expense_record(
     if not sub_category.strip():
         return "请先选择二级分类。"
 
-    supabase.table("expenses").insert(
-        {
-            "expense_date": str(expense_date),
-            "amount": float(amount),
-            "user_name": user_name,
-            "bill_type": bill_type,
-            "parent_category": parent_category,
-            "sub_category": sub_category.strip(),
-            "note": note.strip(),
-        }
-    ).execute()
-    return "ok"
+    try:
+        user_check = (
+            supabase.table("users")
+            .select("id")
+            .eq("id", int(user_id))
+            .limit(1)
+            .execute()
+        )
+        if not user_check.data:
+            return "保存失败：用户不存在（可能数据库里已删除该用户）。"
+
+        category_check = (
+            supabase.table("categories")
+            .select("id")
+            .eq("parent_category", parent_category)
+            .eq("sub_category", sub_category.strip())
+            .limit(1)
+            .execute()
+        )
+        if not category_check.data:
+            return "保存失败：该一级/二级分类组合不存在，请先添加二级分类。"
+
+        supabase.table("expenses").insert(
+            {
+                "expense_date": str(expense_date),
+                "amount": float(amount),
+                "user_id": int(user_id),
+                "user_name": user_name,
+                "bill_type": bill_type,
+                "parent_category": parent_category,
+                "sub_category": sub_category.strip(),
+                "note": note.strip(),
+            }
+        ).execute()
+        return "ok"
+    except Exception as e:
+        error_text = str(e)
+        if "row-level security policy" in error_text.lower():
+            return "保存失败：Supabase RLS 拦截了写入。请在 Supabase 为 users/categories/expenses 添加 INSERT/SELECT 策略，或改用 service_role key。"
+        return f"保存失败：{error_text}"
 
 
 users_df = load_users()
@@ -229,7 +301,11 @@ with st.form("add_expense_form", clear_on_submit=True):
     with col2:
         amount = st.number_input("金额", min_value=0.0, step=1.0, format="%.2f")
     with col3:
-        selected_user = st.selectbox("记账用户", users_df["name"].tolist())
+        user_options = users_df[["id", "name"]].dropna().copy()
+        user_options["id"] = pd.to_numeric(user_options["id"], errors="coerce").fillna(0).astype(int)
+        user_options = user_options[user_options["id"] > 0]
+        selected_user_name = st.selectbox("记账用户", user_options["name"].tolist())
+        selected_user_id = int(user_options[user_options["name"] == selected_user_name]["id"].iloc[0])
 
     col4, col5, col6 = st.columns(3)
     with col4:
@@ -255,7 +331,8 @@ if submitted_expense:
     result = add_expense_record(
         expense_date=selected_date,
         amount=amount,
-        user_name=selected_user,
+        user_id=selected_user_id,
+        user_name=selected_user_name,
         bill_type=selected_bill_type,
         parent_category=selected_parent,
         sub_category=selected_sub,
@@ -274,9 +351,7 @@ if expenses_df.empty:
     st.info("还没有记录，先添加第一笔吧。")
     st.stop()
 
-df = expenses_df.copy()
-df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
-df["expense_date"] = pd.to_datetime(df["expense_date"], errors="coerce")
+df = ensure_expense_columns(expenses_df)
 filtered_df = df.copy()
 
 if selected_user_filter != "全部":
