@@ -1,5 +1,6 @@
 from datetime import date
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 from supabase import Client, create_client
@@ -171,6 +172,13 @@ def delete_expense_record(expense_id: int) -> str:
         return f"删除失败：{e}"
 
 
+def get_sub_options_for_parent(df: pd.DataFrame, parent_category: str) -> list[str]:
+    if df.empty:
+        return []
+    sub_df = df[df["parent_category"] == parent_category]
+    return sorted(sub_df["sub_category"].dropna().unique().tolist())
+
+
 def add_expense_record(
     expense_date: date,
     amount: float,
@@ -284,16 +292,17 @@ with st.sidebar:
     user_filter_options = ["全部"] + users_df["name"].tolist() if not users_df.empty else ["全部"]
     selected_user_filter = st.selectbox("按用户", user_filter_options)
     selected_bill_filter = st.selectbox("按账单类型", ["全部", "个人", "共同"])
-    selected_parent_filter = st.selectbox("按一级分类", ["全部"] + FIXED_PARENT_CATEGORIES)
+    selected_parent_filter = st.selectbox("按一级分类", ["全部"] + FIXED_PARENT_CATEGORIES, key="filter_parent")
 
     if selected_parent_filter == "全部":
         sub_filter_options = ["全部"]
         if not categories_df.empty:
             sub_filter_options += sorted(categories_df["sub_category"].dropna().unique().tolist())
     else:
-        sub_filter_df = categories_df[categories_df["parent_category"] == selected_parent_filter]
-        sub_filter_options = ["全部"] + sorted(sub_filter_df["sub_category"].dropna().unique().tolist())
-    selected_sub_filter = st.selectbox("按二级分类", sub_filter_options)
+        sub_filter_options = ["全部"] + get_sub_options_for_parent(categories_df, selected_parent_filter)
+    if st.session_state.get("filter_sub") not in sub_filter_options:
+        st.session_state["filter_sub"] = "全部"
+    selected_sub_filter = st.selectbox("按二级分类", sub_filter_options, key="filter_sub")
 
     min_day = date(2020, 1, 1)
     max_day = date.today()
@@ -333,15 +342,15 @@ with st.form("add_expense_form", clear_on_submit=True):
     with col4:
         selected_bill_type = st.selectbox("账单类型", ["个人", "共同"])
     with col5:
-        selected_parent = st.selectbox("一级分类（固定）", FIXED_PARENT_CATEGORIES)
+        selected_parent = st.selectbox("一级分类（固定）", FIXED_PARENT_CATEGORIES, key="main_parent")
 
-    sub_options_df = categories_df[categories_df["parent_category"] == selected_parent]
-    sub_options = sub_options_df["sub_category"].dropna().tolist()
-    sub_options = sorted(list(dict.fromkeys(sub_options)))
+    sub_options = get_sub_options_for_parent(categories_df, selected_parent)
+    if st.session_state.get("main_sub") not in sub_options and sub_options:
+        st.session_state["main_sub"] = sub_options[0]
 
     with col6:
         if sub_options:
-            selected_sub = st.selectbox("二级分类", sub_options)
+            selected_sub = st.selectbox("二级分类", sub_options, key="main_sub")
         else:
             selected_sub = ""
             st.warning("该一级分类下没有二级分类，请先在左侧添加。")
@@ -401,6 +410,7 @@ shared_amount = (
     filtered_df[filtered_df["bill_type"] == "共同"]["amount"].sum() if not filtered_df.empty else 0.0
 )
 record_count = len(filtered_df)
+user_count = max(len(users_df), 1)
 
 s1, s2, s3, s4 = st.columns(4)
 s1.markdown(
@@ -420,6 +430,43 @@ s4.markdown(
     unsafe_allow_html=True,
 )
 
+st.subheader("👥 个人应承担支出")
+if selected_user_filter != "全部":
+    selected_user_personal = (
+        filtered_df[
+            (filtered_df["user_name"] == selected_user_filter) & (filtered_df["bill_type"] == "个人")
+        ]["amount"].sum()
+        if not filtered_df.empty
+        else 0.0
+    )
+    selected_user_shared_part = shared_amount / user_count
+    selected_user_payable = selected_user_personal + selected_user_shared_part
+    p1, p2, p3 = st.columns(3)
+    p1.metric("该用户个人支出", f"¥{selected_user_personal:,.2f}")
+    p2.metric("共同支出平摊", f"¥{selected_user_shared_part:,.2f}")
+    p3.metric("该用户应承担", f"¥{selected_user_payable:,.2f}")
+else:
+    st.caption("当前是“全部用户”，下表展示每位用户的应承担金额。")
+
+allocation_rows = []
+for uname in users_df["name"].tolist():
+    uname_personal = (
+        filtered_df[(filtered_df["user_name"] == uname) & (filtered_df["bill_type"] == "个人")]["amount"].sum()
+        if not filtered_df.empty
+        else 0.0
+    )
+    uname_shared = shared_amount / user_count
+    allocation_rows.append(
+        {
+            "用户": uname,
+            "个人支出": round(float(uname_personal), 2),
+            "共同平摊": round(float(uname_shared), 2),
+            "应承担总额": round(float(uname_personal + uname_shared), 2),
+        }
+    )
+allocation_df = pd.DataFrame(allocation_rows).sort_values("应承担总额", ascending=False)
+st.dataframe(allocation_df, use_container_width=True, hide_index=True)
+
 st.subheader("📁 分类汇总区")
 if filtered_df.empty:
     st.info("当前筛选条件下暂无数据。")
@@ -431,6 +478,39 @@ else:
         .rename(columns={"parent_category": "一级分类", "sub_category": "二级分类", "amount": "金额"})
     )
     st.dataframe(category_summary, use_container_width=True, hide_index=True)
+
+st.subheader("📈 可视化统计")
+if filtered_df.empty:
+    st.info("当前筛选条件下暂无可视化数据。")
+else:
+    chart_parent_options = sorted(filtered_df["parent_category"].dropna().unique().tolist())
+    selected_chart_parents = st.multiselect(
+        "选择要显示的一级分类（可多选）",
+        options=chart_parent_options,
+        default=chart_parent_options,
+    )
+    chart_df = filtered_df[filtered_df["parent_category"].isin(selected_chart_parents)].copy()
+    if chart_df.empty:
+        st.info("你当前没有选择任何一级分类。")
+    else:
+        chart_summary = (
+            chart_df.groupby(["parent_category", "sub_category"], as_index=False)["amount"]
+            .sum()
+            .sort_values("amount", ascending=False)
+        )
+        chart = (
+            alt.Chart(chart_summary)
+            .mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
+            .encode(
+                x=alt.X("sub_category:N", title="二级分类", sort="-y"),
+                y=alt.Y("amount:Q", title="金额"),
+                color=alt.Color("parent_category:N", title="一级分类"),
+                tooltip=["parent_category", "sub_category", alt.Tooltip("amount:Q", format=".2f")],
+            )
+            .properties(height=320)
+            .interactive()
+        )
+        st.altair_chart(chart, use_container_width=True)
 
 st.subheader("🧾 记录表格区")
 if filtered_df.empty:
