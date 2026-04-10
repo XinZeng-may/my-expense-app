@@ -7,8 +7,8 @@ from supabase import Client, create_client
 
 st.set_page_config(page_title="情侣记账本", page_icon="💸", layout="wide")
 
-# 固定一级分类（业务规则）
 FIXED_PARENT_CATEGORIES = ["餐饮", "交通", "居家", "购物", "娱乐", "医疗", "学习", "其他"]
+PAYMENT_METHODS = ["现金/借记卡", "信用卡", "转账", "其他"]
 
 st.markdown(
     """
@@ -82,6 +82,14 @@ def load_expenses() -> pd.DataFrame:
     return pd.DataFrame(response.data or [])
 
 
+def load_credit_cards() -> pd.DataFrame:
+    try:
+        response = supabase.table("credit_cards").select("*").order("card_name").execute()
+        return pd.DataFrame(response.data or [])
+    except Exception:
+        return pd.DataFrame()
+
+
 def add_user(name: str) -> str:
     cleaned = name.strip()
     if not cleaned:
@@ -135,6 +143,8 @@ def ensure_expense_columns(df: pd.DataFrame) -> pd.DataFrame:
         "bill_type": "个人",
         "parent_category": "其他",
         "sub_category": "未分类",
+        "payment_method": "现金/借记卡",
+        "card_name": "",
         "note": "",
         "created_at": "",
     }
@@ -150,7 +160,11 @@ def ensure_expense_columns(df: pd.DataFrame) -> pd.DataFrame:
     normalized["parent_category"] = normalized["parent_category"].fillna("其他").astype(str)
     normalized.loc[~normalized["parent_category"].isin(FIXED_PARENT_CATEGORIES), "parent_category"] = "其他"
 
+    normalized["payment_method"] = normalized["payment_method"].fillna("现金/借记卡").astype(str)
+    normalized.loc[~normalized["payment_method"].isin(PAYMENT_METHODS), "payment_method"] = "现金/借记卡"
+
     normalized["sub_category"] = normalized["sub_category"].fillna("未分类").astype(str)
+    normalized["card_name"] = normalized["card_name"].fillna("").astype(str)
     normalized["id"] = pd.to_numeric(normalized["id"], errors="coerce").fillna(0).astype(int)
     normalized["user_id"] = pd.to_numeric(normalized["user_id"], errors="coerce").fillna(0).astype(int)
     normalized["user_name"] = normalized["user_name"].fillna("").astype(str)
@@ -187,6 +201,8 @@ def add_expense_record(
     bill_type: str,
     parent_category: str,
     sub_category: str,
+    payment_method: str,
+    card_name: str,
     note: str,
 ) -> str:
     if amount < 0:
@@ -199,6 +215,10 @@ def add_expense_record(
         return "一级分类不合法。"
     if not sub_category.strip():
         return "请先选择二级分类。"
+    if payment_method not in PAYMENT_METHODS:
+        return "支付方式不合法。"
+    if payment_method == "信用卡" and not card_name.strip():
+        return "信用卡支付必须选择卡片。"
 
     try:
         user_check = (
@@ -231,6 +251,8 @@ def add_expense_record(
                 "bill_type": bill_type,
                 "parent_category": parent_category,
                 "sub_category": sub_category.strip(),
+                "payment_method": payment_method,
+                "card_name": card_name.strip() if payment_method == "信用卡" else "",
                 "note": note.strip(),
             }
         ).execute()
@@ -245,8 +267,8 @@ def add_expense_record(
 users_df = load_users()
 categories_df = load_categories()
 expenses_df = load_expenses()
+cards_df = load_credit_cards()
 
-# 顶部标题区
 st.markdown(
     """
 <div class='top-banner'>
@@ -257,7 +279,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 左侧设置区
 with st.sidebar:
     st.header("⚙️ 设置区")
 
@@ -312,7 +333,6 @@ with st.sidebar:
     if st.button("🔄 刷新最新数据", use_container_width=True):
         st.rerun()
 
-# 基础数据校验
 if users_df.empty:
     st.warning("请先在左侧添加用户。")
     st.stop()
@@ -321,7 +341,6 @@ if categories_df.empty:
     st.warning("请先在左侧添加至少一个二级分类。")
     st.stop()
 
-# 中间添加记录表单
 st.markdown("<div class='panel'>", unsafe_allow_html=True)
 st.subheader("➕ 添加记录")
 st.caption("金额必须 ≥ 0；二级分类会随一级分类实时联动。保存后自动写入 Supabase 并刷新。")
@@ -356,6 +375,19 @@ with col6:
         selected_sub = ""
         st.warning("该一级分类下没有二级分类，请先在左侧添加。")
 
+col7, col8 = st.columns(2)
+with col7:
+    selected_payment_method = st.selectbox("支付方式", PAYMENT_METHODS, key="main_payment_method")
+with col8:
+    if selected_payment_method == "信用卡":
+        card_options = cards_df["card_name"].tolist() if not cards_df.empty and "card_name" in cards_df.columns else []
+        selected_card_name = st.selectbox("信用卡名称", card_options, key="main_card_name") if card_options else ""
+        if not card_options:
+            st.info("没有可选信用卡（可先在 Supabase 的 credit_cards 表加入 card_name）。")
+    else:
+        selected_card_name = ""
+        st.text_input("信用卡名称", value="非信用卡支付", disabled=True, key="main_card_name_disabled")
+
 note = st.text_input("备注", placeholder="例如：午餐AA / Costco补货", key="main_note")
 submitted_expense = st.button("保存记录", use_container_width=True)
 
@@ -368,6 +400,8 @@ if submitted_expense:
         bill_type=selected_bill_type,
         parent_category=selected_parent,
         sub_category=selected_sub,
+        payment_method=selected_payment_method,
+        card_name=selected_card_name,
         note=note,
     )
     if result == "ok":
@@ -378,7 +412,6 @@ if submitted_expense:
 
 st.markdown("</div>", unsafe_allow_html=True)
 
-# 下方统计卡片 / 分类汇总区 / 记录表格区
 if expenses_df.empty:
     st.info("还没有记录，先添加第一笔吧。")
     st.stop()
@@ -386,8 +419,13 @@ if expenses_df.empty:
 df = ensure_expense_columns(expenses_df)
 filtered_df = df.copy()
 
+# 核心修复：选某个用户时，保留“该用户 + 全部共同”
 if selected_user_filter != "全部":
-    filtered_df = filtered_df[filtered_df["user_name"] == selected_user_filter]
+    filtered_df = filtered_df[
+        (filtered_df["user_name"] == selected_user_filter)
+        | (filtered_df["bill_type"] == "共同")
+    ]
+
 if selected_bill_filter != "全部":
     filtered_df = filtered_df[filtered_df["bill_type"] == selected_bill_filter]
 if selected_parent_filter != "全部":
@@ -431,43 +469,6 @@ s4.markdown(
     f"<div class='stat-card'><div class='stat-label'>记录数</div><div class='stat-value'>{record_count}</div></div>",
     unsafe_allow_html=True,
 )
-
-st.subheader("👥 个人应承担支出")
-if selected_user_filter != "全部":
-    selected_user_personal = (
-        filtered_df[
-            (filtered_df["user_name"] == selected_user_filter) & (filtered_df["bill_type"] == "个人")
-        ]["amount"].sum()
-        if not filtered_df.empty
-        else 0.0
-    )
-    selected_user_shared_part = shared_amount / user_count
-    selected_user_payable = selected_user_personal + selected_user_shared_part
-    p1, p2, p3 = st.columns(3)
-    p1.metric("该用户个人支出", f"¥{selected_user_personal:,.2f}")
-    p2.metric("共同支出平摊", f"¥{selected_user_shared_part:,.2f}")
-    p3.metric("该用户应承担", f"¥{selected_user_payable:,.2f}")
-else:
-    st.caption("当前是“全部用户”，下表展示每位用户的应承担金额。")
-
-allocation_rows = []
-for uname in users_df["name"].tolist():
-    uname_personal = (
-        filtered_df[(filtered_df["user_name"] == uname) & (filtered_df["bill_type"] == "个人")]["amount"].sum()
-        if not filtered_df.empty
-        else 0.0
-    )
-    uname_shared = shared_amount / user_count
-    allocation_rows.append(
-        {
-            "用户": uname,
-            "个人支出": round(float(uname_personal), 2),
-            "共同平摊": round(float(uname_shared), 2),
-            "应承担总额": round(float(uname_personal + uname_shared), 2),
-        }
-    )
-allocation_df = pd.DataFrame(allocation_rows).sort_values("应承担总额", ascending=False)
-st.dataframe(allocation_df, use_container_width=True, hide_index=True)
 
 st.subheader("📁 分类汇总区")
 if filtered_df.empty:
@@ -534,6 +535,8 @@ else:
             "bill_type",
             "parent_category",
             "sub_category",
+            "payment_method",
+            "card_name",
             "amount",
             "note",
             "created_at",
@@ -549,6 +552,8 @@ else:
             "bill_type": "类型",
             "parent_category": "一级分类",
             "sub_category": "二级分类",
+            "payment_method": "支付方式",
+            "card_name": "信用卡",
             "amount": "金额",
             "note": "备注",
             "created_at": "创建时间",
