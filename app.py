@@ -911,7 +911,6 @@ with tab1:
                             st.rerun()
                         except Exception as e:
                             st.error(f"修改失败：{e}")
-
 with tab2:
     st.subheader("💵 现金流统计")
     st.caption("当前版本先按支出视角展示：非信用卡=已实际流出，信用卡=待还款。")
@@ -921,9 +920,8 @@ with tab2:
     else:
         cash_df = filtered_df.copy()
 
-        # 关键修复：现金流口径和 Tab1 一致
-        # 全部用户 => 全额
-        # 单个用户 => 个人全额 + 共同/2
+        # 单个用户时：个人全额 + 共同/2
+        # 全部用户时：全额
         if selected_user_filter == "全部":
             cash_df["adjusted_amount"] = cash_df["amount"]
         else:
@@ -932,13 +930,10 @@ with tab2:
                 cash_df.loc[cash_df["bill_type"] == "共同", "amount"] / 2
             )
 
-        # 非信用卡 = 已实际流出
+        # 顶部卡片
         actual_cash_out = cash_df[cash_df["payment_method"] != "信用卡"]["adjusted_amount"].sum()
-
-        # 信用卡 = 待还
         credit_df = cash_df[cash_df["payment_method"] == "信用卡"].copy()
         pending_card_payment = credit_df["adjusted_amount"].sum() if not credit_df.empty else 0.0
-
         total_outflow_view = actual_cash_out + pending_card_payment
 
         c1, c2, c3 = st.columns(3)
@@ -955,105 +950,64 @@ with tab2:
             unsafe_allow_html=True,
         )
 
-        st.markdown("### 按支付方式统计")
-        payment_summary = (
-            cash_df.groupby("payment_method", as_index=False)["adjusted_amount"]
-            .sum()
-            .sort_values("adjusted_amount", ascending=False)
-            .rename(columns={"payment_method": "支付方式", "adjusted_amount": "金额"})
-        )
-        st.dataframe(payment_summary, use_container_width=True, hide_index=True)
+        st.markdown("### 已实际流出（月度汇总）")
 
-        st.markdown("### 信用卡待还汇总")
-        if credit_df.empty:
-            st.info("当前没有信用卡消费记录。")
+        actual_outflow_df = cash_df[cash_df["payment_method"] != "信用卡"].copy()
+
+        if actual_outflow_df.empty:
+            st.info("当前没有已实际流出记录。")
         else:
-            card_summary = (
-                credit_df.groupby("card_name", as_index=False)["adjusted_amount"]
+            actual_outflow_df["月份"] = actual_outflow_df["expense_date"].dt.to_period("M").astype(str)
+
+            actual_monthly_summary = (
+                actual_outflow_df.groupby("月份", as_index=False)["adjusted_amount"]
                 .sum()
-                .rename(columns={"card_name": "card_name", "adjusted_amount": "待还金额"})
-                .sort_values("待还金额", ascending=False)
+                .sort_values("月份", ascending=False)
+                .rename(columns={"adjusted_amount": "已实际流出金额"})
+            )
+
+            st.dataframe(actual_monthly_summary, use_container_width=True, hide_index=True)
+
+        st.markdown("### 信用卡待还（当前欠款汇总）")
+
+        credit_outstanding_df = cash_df[cash_df["payment_method"] == "信用卡"].copy()
+
+        if credit_outstanding_df.empty:
+            st.info("当前没有信用卡待还记录。")
+        else:
+            credit_bill_summary = (
+                credit_outstanding_df.groupby("card_name", as_index=False)["adjusted_amount"]
+                .sum()
+                .sort_values("adjusted_amount", ascending=False)
+                .rename(columns={"card_name": "信用卡", "adjusted_amount": "当前待还金额"})
             )
 
             if not cards_df.empty:
-                card_summary = card_summary.merge(
-                    cards_df[["card_name", "owner_name", "cashback_rate", "payment_due_day"]],
-                    on="card_name",
+                credit_bill_summary = credit_bill_summary.merge(
+                    cards_df[["card_name", "owner_name", "payment_due_day", "cashback_rate"]],
+                    left_on="信用卡",
+                    right_on="card_name",
                     how="left",
                 )
 
-                card_summary["预计cashback"] = card_summary["待还金额"] * card_summary["cashback_rate"].fillna(0)
+                credit_bill_summary["预计cashback"] = (
+                    credit_bill_summary["当前待还金额"] * credit_bill_summary["cashback_rate"].fillna(0)
+                )
 
-                card_summary = card_summary.rename(
+                credit_bill_summary = credit_bill_summary.rename(
                     columns={
-                        "card_name": "信用卡",
                         "owner_name": "属于谁",
+                        "payment_due_day": "每月还款日",
                         "cashback_rate": "cashback比例",
-                        "payment_due_day": "还款日",
                     }
                 )
-            else:
-                card_summary = card_summary.rename(columns={"card_name": "信用卡"})
 
-            st.dataframe(card_summary, use_container_width=True, hide_index=True)
+                credit_bill_summary = credit_bill_summary[
+                    ["信用卡", "当前待还金额", "属于谁", "每月还款日", "cashback比例", "预计cashback"]
+                ]
 
-st.markdown("### 已实际流出（月度汇总）")
+            st.dataframe(credit_bill_summary, use_container_width=True, hide_index=True)
 
-actual_outflow_df = cash_df[cash_df["payment_method"] != "信用卡"].copy()
-
-if actual_outflow_df.empty:
-    st.info("当前没有已实际流出记录。")
-else:
-    actual_outflow_df["月份"] = actual_outflow_df["expense_date"].dt.to_period("M").astype(str)
-
-    actual_monthly_summary = (
-        actual_outflow_df.groupby("月份", as_index=False)["adjusted_amount"]
-        .sum()
-        .sort_values("月份", ascending=False)
-        .rename(columns={"adjusted_amount": "已实际流出金额"})
-    )
-
-    st.dataframe(actual_monthly_summary, use_container_width=True, hide_index=True)
-
-st.markdown("### 信用卡待还（当前欠款汇总）")
-
-credit_outstanding_df = cash_df[cash_df["payment_method"] == "信用卡"].copy()
-
-if credit_outstanding_df.empty:
-    st.info("当前没有信用卡待还记录。")
-else:
-    credit_bill_summary = (
-        credit_outstanding_df.groupby("card_name", as_index=False)["adjusted_amount"]
-        .sum()
-        .sort_values("adjusted_amount", ascending=False)
-        .rename(columns={"card_name": "信用卡", "adjusted_amount": "当前待还金额"})
-    )
-
-    if not cards_df.empty:
-        credit_bill_summary = credit_bill_summary.merge(
-            cards_df[["card_name", "owner_name", "payment_due_day", "cashback_rate"]],
-            left_on="信用卡",
-            right_on="card_name",
-            how="left",
-        )
-
-        credit_bill_summary["预计cashback"] = (
-            credit_bill_summary["当前待还金额"] * credit_bill_summary["cashback_rate"].fillna(0)
-        )
-
-        credit_bill_summary = credit_bill_summary.rename(
-            columns={
-                "owner_name": "属于谁",
-                "payment_due_day": "每月还款日",
-                "cashback_rate": "cashback比例",
-            }
-        )
-
-        credit_bill_summary = credit_bill_summary[
-            ["信用卡", "当前待还金额", "属于谁", "每月还款日", "cashback比例", "预计cashback"]
-        ]
-
-    st.dataframe(credit_bill_summary, use_container_width=True, hide_index=True)       
 
 with tab3:
     st.subheader("💳 信用卡管理")
