@@ -170,6 +170,76 @@ def add_credit_card(card_name: str, owner_name: str, cashback_rate: float, payme
     except Exception as e:
         return f"保存信用卡失败：{e}"
 
+def update_credit_card(
+    old_card_name: str,
+    new_card_name: str,
+    owner_name: str,
+    cashback_rate: float,
+    payment_due_day: int,
+    is_active: bool,
+) -> str:
+    old_card_name = old_card_name.strip()
+    new_card_name = new_card_name.strip()
+    owner_name = owner_name.strip()
+
+    if not old_card_name:
+        return "原信用卡名称不能为空。"
+    if not new_card_name:
+        return "新信用卡名称不能为空。"
+    if not owner_name:
+        return "属于谁不能为空。"
+    if cashback_rate < 0:
+        return "cashback 不能小于 0。"
+    if payment_due_day < 1 or payment_due_day > 31:
+        return "每月还款日必须在 1 到 31 之间。"
+
+    try:
+        # 如果改了卡名，先检查新卡名是否已存在
+        if old_card_name != new_card_name:
+            existing = (
+                supabase.table("credit_cards")
+                .select("id")
+                .eq("card_name", new_card_name)
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                return "新的信用卡名称已存在。"
+
+        # 更新信用卡表
+        supabase.table("credit_cards").update(
+            {
+                "card_name": new_card_name,
+                "owner_name": owner_name,
+                "cashback_rate": float(cashback_rate),
+                "payment_due_day": int(payment_due_day),
+                "is_active": bool(is_active),
+            }
+        ).eq("card_name", old_card_name).execute()
+
+        # 如果卡名改了，同步更新历史 expenses 里的 card_name
+        if old_card_name != new_card_name:
+            supabase.table("expenses").update(
+                {"card_name": new_card_name}
+            ).eq("card_name", old_card_name).execute()
+
+        return "ok"
+    except Exception as e:
+        return f"修改信用卡失败：{e}"
+
+
+def deactivate_credit_card(card_name: str) -> str:
+    card_name = card_name.strip()
+    if not card_name:
+        return "信用卡名称不能为空。"
+
+    try:
+        supabase.table("credit_cards").update(
+            {"is_active": False}
+        ).eq("card_name", card_name).execute()
+        return "ok"
+    except Exception as e:
+        return f"停用信用卡失败：{e}"
 
 def ensure_expense_columns(df: pd.DataFrame) -> pd.DataFrame:
     expected_defaults = {
@@ -950,6 +1020,7 @@ with tab2:
 with tab3:
     st.subheader("💳 信用卡管理")
 
+    latest_cards_df = ensure_credit_card_columns(load_credit_cards())
     owner_options = ["共同"] + users_df["name"].dropna().unique().tolist() if not users_df.empty else ["共同"]
 
     st.markdown("### 添加信用卡")
@@ -977,9 +1048,93 @@ with tab3:
         else:
             st.warning(result)
 
-    st.markdown("### 已保存的信用卡")
-    latest_cards_df = ensure_credit_card_columns(load_credit_cards())
+    st.markdown("### 修改信用卡")
+    active_cards_df = latest_cards_df[latest_cards_df["is_active"] == True].copy() if not latest_cards_df.empty else pd.DataFrame()
 
+    if active_cards_df.empty:
+        st.info("当前没有可修改的启用中信用卡。")
+    else:
+        edit_card_pick = st.selectbox(
+            "选择要修改的信用卡",
+            active_cards_df["card_name"].tolist(),
+            key="edit_credit_card_pick",
+        )
+
+        edit_card_row = active_cards_df[active_cards_df["card_name"] == edit_card_pick].iloc[0]
+
+        with st.form("edit_credit_card_form"):
+            e1, e2 = st.columns(2)
+            with e1:
+                edited_card_name = st.text_input("新信用卡名称", value=str(edit_card_row["card_name"]))
+                owner_index = owner_options.index(str(edit_card_row["owner_name"])) if str(edit_card_row["owner_name"]) in owner_options else 0
+                edited_owner_name = st.selectbox("新属于谁", owner_options, index=owner_index)
+            with e2:
+                edited_cashback_rate = st.number_input(
+                    "新 cashback 比例",
+                    min_value=0.0,
+                    value=float(edit_card_row["cashback_rate"]),
+                    step=0.005,
+                    format="%.3f",
+                )
+                current_due_day = int(edit_card_row["payment_due_day"]) if pd.notna(edit_card_row["payment_due_day"]) else 1
+                edited_payment_due_day = st.number_input(
+                    "新每月还款日",
+                    min_value=1,
+                    max_value=31,
+                    value=current_due_day,
+                    step=1,
+                )
+
+            edited_is_active = st.checkbox(
+                "启用中",
+                value=bool(edit_card_row["is_active"]),
+            )
+
+            confirm_edit_card = st.checkbox("我确认要修改这张信用卡", value=False)
+            submitted_edit_card = st.form_submit_button("保存信用卡修改", use_container_width=True)
+
+        if submitted_edit_card:
+            if not confirm_edit_card:
+                st.warning("请先勾选确认修改。")
+            else:
+                result = update_credit_card(
+                    old_card_name=str(edit_card_row["card_name"]),
+                    new_card_name=edited_card_name,
+                    owner_name=edited_owner_name,
+                    cashback_rate=float(edited_cashback_rate),
+                    payment_due_day=int(edited_payment_due_day),
+                    is_active=bool(edited_is_active),
+                )
+                if result == "ok":
+                    st.success("信用卡已修改。")
+                    st.rerun()
+                else:
+                    st.error(result)
+
+    st.markdown("### 停用信用卡")
+    if active_cards_df.empty:
+        st.info("当前没有可停用的启用中信用卡。")
+    else:
+        deactivate_card_pick = st.selectbox(
+            "选择要停用的信用卡",
+            active_cards_df["card_name"].tolist(),
+            key="deactivate_credit_card_pick",
+        )
+
+        confirm_deactivate = st.checkbox("我确认要停用这张信用卡", value=False, key="confirm_deactivate_card")
+
+        if st.button("停用信用卡", use_container_width=True, key="deactivate_credit_card_btn"):
+            if not confirm_deactivate:
+                st.warning("请先勾选确认停用。")
+            else:
+                result = deactivate_credit_card(deactivate_card_pick)
+                if result == "ok":
+                    st.success("信用卡已停用。停用后不会再出现在 Tab1 的可选信用卡里，但历史记录仍会保留。")
+                    st.rerun()
+                else:
+                    st.error(result)
+
+    st.markdown("### 已保存的信用卡")
     if latest_cards_df.empty:
         st.info("还没有信用卡。")
     else:
