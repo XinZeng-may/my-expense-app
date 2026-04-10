@@ -1334,7 +1334,7 @@ with tab1:
                             st.error(f"修改失败：{e}")
 with tab2:
     st.subheader("💵 现金流统计")
-    st.caption("逻辑：现金/借记卡当天流出；信用卡只有在手动记录还款后才算已实际流出；工资按规则自动生成。")
+    st.caption("逻辑：现金/借记卡当天流出；信用卡消费先进入待还，只有手动记录还款后才算已实际流出；工资按规则自动生成。")
 
     # =========================
     # 0. 日期区间
@@ -1348,22 +1348,170 @@ with tab2:
         range_end = today
 
     # =========================
-    # 1. 手动记录信用卡还款
+    # 1. 准备支出数据源
+    # =========================
+    cash_source_df = df.copy()
+
+    if selected_user_filter != "全部":
+        cash_source_df = cash_source_df[
+            (cash_source_df["user_name"] == selected_user_filter)
+            | (cash_source_df["bill_type"] == "共同")
+        ]
+
+    if selected_bill_filter != "全部":
+        cash_source_df = cash_source_df[cash_source_df["bill_type"] == selected_bill_filter]
+
+    if selected_parent_filter != "全部":
+        cash_source_df = cash_source_df[cash_source_df["parent_category"] == selected_parent_filter]
+
+    if selected_sub_filter != "全部":
+        cash_source_df = cash_source_df[cash_source_df["sub_category"] == selected_sub_filter]
+
+    # 只看截至区间结束日之前的支出
+    if not cash_source_df.empty:
+        cash_source_df = cash_source_df[
+            pd.to_datetime(cash_source_df["expense_date"], errors="coerce").dt.date <= range_end
+        ].copy()
+
+        # 单用户：共同支出按一半算
+        if selected_user_filter == "全部":
+            cash_source_df["adjusted_amount"] = cash_source_df["amount"]
+        else:
+            cash_source_df["adjusted_amount"] = cash_source_df["amount"]
+            cash_source_df.loc[cash_source_df["bill_type"] == "共同", "adjusted_amount"] = (
+                cash_source_df.loc[cash_source_df["bill_type"] == "共同", "amount"] / 2
+            )
+    else:
+        cash_source_df = pd.DataFrame(columns=list(df.columns) + ["adjusted_amount"])
+
+    # =========================
+    # 2. 信用卡消费 + cashback 规则
+    # =========================
+    credit_charge_df = cash_source_df[
+        (cash_source_df["payment_method"] == "信用卡")
+        & (cash_source_df["card_name"].fillna("") != "")
+    ].copy()
+
+    if not credit_charge_df.empty:
+        credit_charge_df = apply_cashback_rules(
+            credit_charge_df,
+            cards_df,
+            cashback_rules_df,
+        )
+
+    # =========================
+    # 3. 信用卡还款记录
+    # =========================
+    payments_df = credit_card_payments_df.copy() if not credit_card_payments_df.empty else pd.DataFrame()
+
+    if not payments_df.empty:
+        payments_df["payment_date"] = pd.to_datetime(payments_df["payment_date"], errors="coerce")
+        payments_df = payments_df[payments_df["payment_date"].dt.date <= range_end].copy()
+
+        if selected_user_filter != "全部":
+            payments_df = payments_df[
+                payments_df["payer_name"].isin([selected_user_filter, "共同"])
+            ].copy()
+
+    # =========================
+    # 4. 当前待还汇总（先算出来，后面还款表单要用）
+    # =========================
+    if credit_charge_df.empty:
+        current_outstanding_summary = pd.DataFrame(
+            columns=["信用卡", "总消费金额", "总预计cashback", "属于谁", "每月还款日", "已还金额", "当前待还金额", "待还cashback", "下一次还款日期"]
+        )
+    else:
+        charge_summary = (
+            credit_charge_df.groupby("card_name", as_index=False)
+            .agg(
+                总消费金额=("adjusted_amount", "sum"),
+                总预计cashback=("estimated_cashback", "sum"),
+            )
+            .rename(columns={"card_name": "信用卡"})
+        )
+
+        if not payments_df.empty:
+            payment_summary = (
+                payments_df.groupby("card_name", as_index=False)["amount"]
+                .sum()
+                .rename(columns={"card_name": "信用卡", "amount": "已还金额"})
+            )
+        else:
+            payment_summary = pd.DataFrame(columns=["信用卡", "已还金额"])
+
+        if not cards_df.empty:
+            card_meta_df = cards_df.rename(
+                columns={
+                    "card_name": "信用卡",
+                    "owner_name": "属于谁",
+                    "payment_due_day": "每月还款日",
+                }
+            )[["信用卡", "属于谁", "每月还款日"]].copy()
+        else:
+            card_meta_df = pd.DataFrame(columns=["信用卡", "属于谁", "每月还款日"])
+
+        current_outstanding_summary = charge_summary.merge(card_meta_df, on="信用卡", how="left")
+        current_outstanding_summary = current_outstanding_summary.merge(payment_summary, on="信用卡", how="left")
+        current_outstanding_summary["已还金额"] = current_outstanding_summary["已还金额"].fillna(0.0)
+
+        current_outstanding_summary["当前待还金额"] = (
+            current_outstanding_summary["总消费金额"] - current_outstanding_summary["已还金额"]
+        ).clip(lower=0)
+
+        # 剩余待还对应的 cashback，按比例折算
+        current_outstanding_summary["待还cashback"] = current_outstanding_summary.apply(
+            lambda row: (
+                row["总预计cashback"] * (row["当前待还金额"] / row["总消费金额"])
+                if row["总消费金额"] > 0 else 0.0
+            ),
+            axis=1
+        )
+
+        today_value = date.today()
+
+        def get_next_due_date(due_day):
+            if pd.isna(due_day):
+                return None
+            due_day = int(due_day)
+            this_month_due = safe_day_in_month(today_value.year, today_value.month, due_day)
+            if this_month_due >= today_value:
+                return this_month_due
+            if today_value.month == 12:
+                return safe_day_in_month(today_value.year + 1, 1, due_day)
+            return safe_day_in_month(today_value.year, today_value.month + 1, due_day)
+
+        current_outstanding_summary["下一次还款日期"] = current_outstanding_summary["每月还款日"].apply(get_next_due_date)
+
+        current_outstanding_summary = current_outstanding_summary[current_outstanding_summary["当前待还金额"] > 0].copy()
+        current_outstanding_summary = current_outstanding_summary.sort_values("当前待还金额", ascending=False)
+
+    outstanding_card_names = current_outstanding_summary["信用卡"].tolist() if not current_outstanding_summary.empty else []
+    outstanding_map = {}
+    if not current_outstanding_summary.empty:
+        outstanding_map = dict(
+            zip(current_outstanding_summary["信用卡"], current_outstanding_summary["当前待还金额"])
+        )
+
+    # =========================
+    # 5. 手动记录信用卡还款（增强版）
     # =========================
     st.markdown("### 💳 手动记录信用卡还款")
 
-    active_card_names = (
-        cards_df[cards_df["is_active"] == True]["card_name"].dropna().unique().tolist()
-        if not cards_df.empty else []
-    )
     payer_options = (
         ["共同"] + users_df["name"].dropna().unique().tolist()
         if not users_df.empty else ["共同"]
     )
 
-    if not active_card_names:
-        st.info("请先在信用卡管理里添加并启用至少一张信用卡。")
+    if not outstanding_card_names:
+        st.info("当前没有待还的信用卡。")
     else:
+        selected_repay_card_preview = st.selectbox(
+            "选择要还款的信用卡（查看当前待还）",
+            outstanding_card_names,
+            key="repay_card_preview"
+        )
+        st.info(f"当前 {selected_repay_card_preview} 待还金额：¥{outstanding_map.get(selected_repay_card_preview, 0):,.2f}")
+
         with st.form("add_credit_card_payment_form", clear_on_submit=True):
             rp1, rp2, rp3 = st.columns(3)
             with rp1:
@@ -1375,13 +1523,18 @@ with tab2:
             with rp2:
                 repayment_card_name = st.selectbox(
                     "信用卡",
-                    active_card_names,
+                    outstanding_card_names,
+                    index=outstanding_card_names.index(selected_repay_card_preview),
                     key="repayment_card"
                 )
             with rp3:
+                repay_full = st.checkbox("本次还全额", value=True, key="repay_full_checkbox")
+
+                default_repay_amount = float(outstanding_map.get(selected_repay_card_preview, 0.0))
                 repayment_amount = st.number_input(
                     "还款金额",
                     min_value=0.0,
+                    value=default_repay_amount,
                     step=10.0,
                     format="%.2f",
                     key="repayment_amount"
@@ -1397,6 +1550,7 @@ with tab2:
             with rp5:
                 repayment_note = st.text_input(
                     "备注",
+                    placeholder="例如：4月账单全额还款 / 提前部分还款",
                     key="repayment_note"
                 )
 
@@ -1406,21 +1560,27 @@ with tab2:
             )
 
         if submitted_repayment:
-            result = add_credit_card_payment(
-                payment_date_value,
-                repayment_card_name,
-                float(repayment_amount),
-                repayment_payer,
-                repayment_note,
-            )
-            if result == "ok":
-                st.success("信用卡还款记录已保存。")
-                st.rerun()
+            # 如果勾选全额，就自动覆盖金额
+            actual_repayment_amount = float(outstanding_map.get(repayment_card_name, 0.0)) if repay_full else float(repayment_amount)
+
+            if actual_repayment_amount <= 0:
+                st.error("还款金额必须大于 0。")
             else:
-                st.error(result)
+                result = add_credit_card_payment(
+                    payment_date_value,
+                    repayment_card_name,
+                    actual_repayment_amount,
+                    repayment_payer,
+                    repayment_note,
+                )
+                if result == "ok":
+                    st.success("信用卡还款记录已保存。")
+                    st.rerun()
+                else:
+                    st.error(result)
 
     # =========================
-    # 2. 现金流入规则（Paycheck）
+    # 6. Paycheck 规则
     # =========================
     st.markdown("### 💰 现金流入规则（Paycheck）")
 
@@ -1490,56 +1650,14 @@ with tab2:
                     "start_date": "起始发薪日",
                     "second_day": "第二个发薪日",
                     "is_active": "启用中",
-                    "created_at": "created_at",
                 }
             ),
             use_container_width=True,
             hide_index=True,
         )
 
-    st.markdown("---")
-
     # =========================
-    # 3. 为现金流准备支出数据源
-    #    注意：这里不要先按开始日期切掉
-    #    因为待还需要看历史累计到 range_end 的消费
-    # =========================
-    cash_source_df = df.copy()
-
-    # 用户筛选
-    if selected_user_filter != "全部":
-        cash_source_df = cash_source_df[
-            (cash_source_df["user_name"] == selected_user_filter)
-            | (cash_source_df["bill_type"] == "共同")
-        ]
-
-    # 其他筛选
-    if selected_bill_filter != "全部":
-        cash_source_df = cash_source_df[cash_source_df["bill_type"] == selected_bill_filter]
-
-    if selected_parent_filter != "全部":
-        cash_source_df = cash_source_df[cash_source_df["parent_category"] == selected_parent_filter]
-
-    if selected_sub_filter != "全部":
-        cash_source_df = cash_source_df[cash_source_df["sub_category"] == selected_sub_filter]
-
-    # 只看截至区间结束日之前的消费
-    cash_source_df = cash_source_df[
-        pd.to_datetime(cash_source_df["expense_date"], errors="coerce").dt.date <= range_end
-    ].copy()
-
-    # 全部用户 / 单个用户口径统一
-    if not cash_source_df.empty:
-        if selected_user_filter == "全部":
-            cash_source_df["adjusted_amount"] = cash_source_df["amount"]
-        else:
-            cash_source_df["adjusted_amount"] = cash_source_df["amount"]
-            cash_source_df.loc[cash_source_df["bill_type"] == "共同", "adjusted_amount"] = (
-                cash_source_df.loc[cash_source_df["bill_type"] == "共同", "amount"] / 2
-            )
-
-    # =========================
-    # 4. paycheck 事件（流入）
+    # 7. paycheck 事件
     # =========================
     active_paychecks_df = (
         paychecks_df[paychecks_df["is_active"] == True].copy()
@@ -1554,7 +1672,7 @@ with tab2:
     paycheck_events_df = generate_paycheck_events(active_paychecks_df, range_start, range_end)
 
     # =========================
-    # 5. 直接支付：当天就是已实际流出
+    # 8. 直接支付：当天流出
     # =========================
     direct_outflow_all = cash_source_df[cash_source_df["payment_method"] != "信用卡"].copy()
 
@@ -1568,20 +1686,8 @@ with tab2:
         ].copy()
 
     # =========================
-    # 6. 信用卡还款记录：只有还了才算已实际流出
+    # 9. 本区间内实际信用卡还款
     # =========================
-    payments_df = credit_card_payments_df.copy()
-
-    if not payments_df.empty:
-        payments_df["payment_date"] = pd.to_datetime(payments_df["payment_date"], errors="coerce")
-        payments_df = payments_df[payments_df["payment_date"].dt.date <= range_end].copy()
-
-        if selected_user_filter != "全部":
-            payments_df = payments_df[
-                payments_df["payer_name"].isin([selected_user_filter, "共同"])
-            ].copy()
-
-    # 本区间内实际还款
     payment_events_in_range = pd.DataFrame()
     if not payments_df.empty:
         payment_events_in_range = payments_df[
@@ -1590,16 +1696,14 @@ with tab2:
         ].copy()
 
     # =========================
-    # 7. 顶部卡片
+    # 10. 顶部卡片
     # =========================
     inflow_amount = paycheck_events_df["amount"].sum() if not paycheck_events_df.empty else 0.0
     direct_outflow_amount = direct_outflow_in_range["adjusted_amount"].sum() if not direct_outflow_in_range.empty else 0.0
     card_payment_outflow_amount = payment_events_in_range["amount"].sum() if not payment_events_in_range.empty else 0.0
     actual_outflow_amount = direct_outflow_amount + card_payment_outflow_amount
+    pending_card_amount = current_outstanding_summary["当前待还金额"].sum() if not current_outstanding_summary.empty else 0.0
     net_cashflow_amount = inflow_amount - actual_outflow_amount
-
-    # 当前信用卡待还稍后算
-    pending_card_amount = 0.0
 
     c1, c2, c3, c4 = st.columns(4)
     c1.markdown(
@@ -1611,7 +1715,7 @@ with tab2:
         unsafe_allow_html=True,
     )
     c3.markdown(
-        f"<div class='stat-card'><div class='stat-label'>当前信用卡待还</div><div class='stat-value'>¥0.00</div></div>",
+        f"<div class='stat-card'><div class='stat-label'>当前信用卡待还</div><div class='stat-value'>¥{pending_card_amount:,.2f}</div></div>",
         unsafe_allow_html=True,
     )
     c4.markdown(
@@ -1620,7 +1724,7 @@ with tab2:
     )
 
     # =========================
-    # 8. 现金流日程表
+    # 11. 现金流日程表
     # =========================
     st.markdown("### 🗓️ 现金流日程表")
 
@@ -1652,7 +1756,7 @@ with tab2:
 
     if not payment_events_in_range.empty:
         pay_schedule = payment_events_in_range.copy()
-        pay_schedule["日期"] = pay_schedule["payment_date"].dt.date.astype(str)
+        pay_schedule["日期"] = payment_events_in_range["payment_date"].dt.date.astype(str)
         pay_schedule["类型"] = "信用卡还款"
         pay_schedule["说明"] = (
             pay_schedule["payer_name"].fillna("").astype(str)
@@ -1672,7 +1776,7 @@ with tab2:
         st.info("当前日期区间内暂无现金流日程。")
 
     # =========================
-    # 9. 已实际流出（月度汇总）
+    # 12. 已实际流出（月度汇总）
     # =========================
     st.markdown("### 已实际流出（月度汇总）")
 
@@ -1705,109 +1809,18 @@ with tab2:
         st.info("当前没有已实际流出记录。")
 
     # =========================
-    # 10. 信用卡待还（当前欠款汇总）
+    # 13. 当前信用卡待还
     # =========================
     st.markdown("### 信用卡待还（当前欠款汇总）")
 
-    credit_outstanding_df = cash_source_df[
-        (cash_source_df["payment_method"] == "信用卡")
-        & (cash_source_df["card_name"].fillna("") != "")
-    ].copy()
-
-    if credit_outstanding_df.empty:
-        st.info("当前没有信用卡消费记录。")
+    if current_outstanding_summary.empty:
+        st.info("当前没有待还信用卡。")
     else:
-        # 逐笔应用 cashback 规则
-        credit_outstanding_df = apply_cashback_rules(
-            credit_outstanding_df,
-            cards_df,
-            cashback_rules_df,
-        )
+        show_outstanding_df = current_outstanding_summary[
+            ["信用卡", "当前待还金额", "属于谁", "每月还款日", "下一次还款日期", "待还cashback", "已还金额"]
+        ].copy()
 
-        # 消费汇总（每张卡）
-        charge_summary = (
-            credit_outstanding_df.groupby("card_name", as_index=False)
-            .agg(
-                总消费金额=("adjusted_amount", "sum"),
-                总预计cashback=("estimated_cashback", "sum"),
-            )
-            .rename(columns={"card_name": "信用卡"})
-        )
-
-        # 还款汇总（每张卡）
-        if not payments_df.empty:
-            payment_summary = (
-                payments_df.groupby("card_name", as_index=False)["amount"]
-                .sum()
-                .rename(columns={"card_name": "信用卡", "amount": "已还金额"})
-            )
-        else:
-            payment_summary = pd.DataFrame(columns=["信用卡", "已还金额"])
-
-        # 信用卡主表信息
-        card_meta_df = (
-            cards_df.rename(
-                columns={
-                    "card_name": "信用卡",
-                    "owner_name": "属于谁",
-                    "payment_due_day": "每月还款日",
-                }
-            )[["信用卡", "属于谁", "每月还款日"]].copy()
-            if not cards_df.empty
-            else pd.DataFrame(columns=["信用卡", "属于谁", "每月还款日"])
-        )
-
-        final_summary = charge_summary.merge(card_meta_df, on="信用卡", how="left")
-        final_summary = final_summary.merge(payment_summary, on="信用卡", how="left")
-        final_summary["已还金额"] = final_summary["已还金额"].fillna(0.0)
-
-        # 当前待还金额 = 总消费 - 已还
-        final_summary["当前待还金额"] = final_summary["总消费金额"] - final_summary["已还金额"]
-        final_summary["当前待还金额"] = final_summary["当前待还金额"].clip(lower=0)
-
-        # 当前待还对应 cashback
-        final_summary["待还cashback"] = final_summary.apply(
-            lambda row: (
-                row["总预计cashback"] * (row["当前待还金额"] / row["总消费金额"])
-                if row["总消费金额"] > 0 else 0.0
-            ),
-            axis=1
-        )
-
-        # 下一次还款日期
-        today_value = date.today()
-
-        def get_next_due_date(due_day):
-            if pd.isna(due_day):
-                return None
-            due_day = int(due_day)
-            this_month_due = safe_day_in_month(today_value.year, today_value.month, due_day)
-            if this_month_due >= today_value:
-                return this_month_due
-            if today_value.month == 12:
-                return safe_day_in_month(today_value.year + 1, 1, due_day)
-            return safe_day_in_month(today_value.year, today_value.month + 1, due_day)
-
-        final_summary["下一次还款日期"] = final_summary["每月还款日"].apply(get_next_due_date)
-
-        # 只显示还有待还的卡
-        final_summary = final_summary[final_summary["当前待还金额"] > 0].copy()
-        pending_card_amount = final_summary["当前待还金额"].sum() if not final_summary.empty else 0.0
-
-        # 更新顶部“当前信用卡待还”
-        c3.markdown(
-            f"<div class='stat-card'><div class='stat-label'>当前信用卡待还</div><div class='stat-value'>¥{pending_card_amount:,.2f}</div></div>",
-            unsafe_allow_html=True,
-        )
-
-        if final_summary.empty:
-            st.info("当前没有待还信用卡。")
-        else:
-            final_summary = final_summary[
-                ["信用卡", "当前待还金额", "属于谁", "每月还款日", "下一次还款日期", "待还cashback", "已还金额"]
-            ].sort_values("当前待还金额", ascending=False)
-
-            st.dataframe(final_summary, use_container_width=True, hide_index=True)
+        st.dataframe(show_outstanding_df, use_container_width=True, hide_index=True)
 with tab3:
     st.subheader("💳 信用卡管理")
 
