@@ -1,5 +1,5 @@
-from datetime import date
-
+import calendar
+from datetime import date, timedelta
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -88,6 +88,240 @@ def load_credit_cards() -> pd.DataFrame:
         return pd.DataFrame(response.data or [])
     except Exception:
         return pd.DataFrame()
+def load_paychecks() -> pd.DataFrame:
+    try:
+        response = (
+            supabase.table("paychecks")
+            .select("*")
+            .order("user_name")
+            .order("start_date")
+            .execute()
+        )
+        return pd.DataFrame(response.data or [])
+    except Exception:
+        return pd.DataFrame()
+
+
+def ensure_paycheck_columns(df: pd.DataFrame) -> pd.DataFrame:
+    expected_defaults = {
+        "id": 0,
+        "user_name": "",
+        "income_name": "工资",
+        "amount": 0.0,
+        "frequency": "biweekly",
+        "start_date": pd.NaT,
+        "second_day": None,
+        "is_active": True,
+        "created_at": "",
+    }
+
+    normalized = df.copy()
+    for col, default in expected_defaults.items():
+        if col not in normalized.columns:
+            normalized[col] = default
+
+    normalized["id"] = pd.to_numeric(normalized["id"], errors="coerce").fillna(0).astype(int)
+    normalized["user_name"] = normalized["user_name"].fillna("").astype(str)
+    normalized["income_name"] = normalized["income_name"].fillna("工资").astype(str)
+    normalized["amount"] = pd.to_numeric(normalized["amount"], errors="coerce").fillna(0.0)
+    normalized["frequency"] = normalized["frequency"].fillna("biweekly").astype(str)
+    normalized["start_date"] = pd.to_datetime(normalized["start_date"], errors="coerce")
+    normalized["second_day"] = pd.to_numeric(normalized["second_day"], errors="coerce")
+    normalized["is_active"] = normalized["is_active"].fillna(True)
+
+    return normalized
+
+
+def add_paycheck_rule(
+    user_name: str,
+    income_name: str,
+    amount: float,
+    frequency: str,
+    start_date_value: date,
+    second_day: int | None,
+) -> str:
+    user_name = user_name.strip()
+    income_name = income_name.strip()
+
+    if not user_name:
+        return "属于谁不能为空。"
+    if not income_name:
+        return "收入名称不能为空。"
+    if amount <= 0:
+        return "金额必须大于 0。"
+    if frequency not in ["biweekly", "twice_a_month", "monthly"]:
+        return "频率不合法。"
+    if frequency == "twice_a_month":
+        if second_day is None or second_day < 1 or second_day > 31:
+            return "每月两次发薪时，第二个发薪日必须在 1 到 31 之间。"
+
+    try:
+        supabase.table("paychecks").insert(
+            {
+                "user_name": user_name,
+                "income_name": income_name,
+                "amount": float(amount),
+                "frequency": frequency,
+                "start_date": str(start_date_value),
+                "second_day": int(second_day) if second_day is not None else None,
+                "is_active": True,
+            }
+        ).execute()
+        return "ok"
+    except Exception as e:
+        return f"保存 paycheck 规则失败：{e}"
+
+
+def safe_day_in_month(year: int, month: int, day: int) -> date:
+    last_day = calendar.monthrange(year, month)[1]
+    return date(year, month, min(int(day), last_day))
+
+
+def next_due_date_after(base_date: date, due_day: int) -> date:
+    current_month_due = safe_day_in_month(base_date.year, base_date.month, due_day)
+
+    # 同一天不算已经到期，推到下一个月
+    if current_month_due > base_date:
+        return current_month_due
+
+    if base_date.month == 12:
+        return safe_day_in_month(base_date.year + 1, 1, due_day)
+    return safe_day_in_month(base_date.year, base_date.month + 1, due_day)
+
+
+def generate_paycheck_events(paychecks_df: pd.DataFrame, range_start: date, range_end: date) -> pd.DataFrame:
+    events = []
+
+    if paychecks_df.empty:
+        return pd.DataFrame(columns=["event_date", "user_name", "income_name", "amount", "event_type", "status"])
+
+    for _, row in paychecks_df.iterrows():
+        if not bool(row["is_active"]):
+            continue
+
+        user_name = str(row["user_name"])
+        income_name = str(row["income_name"])
+        amount = float(row["amount"])
+        frequency = str(row["frequency"])
+
+        if pd.isna(row["start_date"]):
+            continue
+
+        start_date_value = pd.to_datetime(row["start_date"]).date()
+
+        if frequency == "biweekly":
+            current = start_date_value
+            while current < range_start:
+                current += timedelta(days=14)
+
+            while current <= range_end:
+                events.append(
+                    {
+                        "event_date": current,
+                        "user_name": user_name,
+                        "income_name": income_name,
+                        "amount": amount,
+                        "event_type": "现金流入",
+                        "status": "预计",
+                    }
+                )
+                current += timedelta(days=14)
+
+        elif frequency == "monthly":
+            first_month = date(range_start.year, range_start.month, 1)
+            last_month = date(range_end.year, range_end.month, 1)
+            current_month = first_month
+
+            while current_month <= last_month:
+                pay_date = safe_day_in_month(current_month.year, current_month.month, start_date_value.day)
+                if pay_date >= start_date_value and range_start <= pay_date <= range_end:
+                    events.append(
+                        {
+                            "event_date": pay_date,
+                            "user_name": user_name,
+                            "income_name": income_name,
+                            "amount": amount,
+                            "event_type": "现金流入",
+                            "status": "预计",
+                        }
+                    )
+
+                if current_month.month == 12:
+                    current_month = date(current_month.year + 1, 1, 1)
+                else:
+                    current_month = date(current_month.year, current_month.month + 1, 1)
+
+        elif frequency == "twice_a_month":
+            first_day = start_date_value.day
+            second_pay_day = int(row["second_day"]) if pd.notna(row["second_day"]) else 30
+
+            first_month = date(range_start.year, range_start.month, 1)
+            last_month = date(range_end.year, range_end.month, 1)
+            current_month = first_month
+
+            while current_month <= last_month:
+                for pay_day in sorted(set([first_day, second_pay_day])):
+                    pay_date = safe_day_in_month(current_month.year, current_month.month, pay_day)
+                    if pay_date >= start_date_value and range_start <= pay_date <= range_end:
+                        events.append(
+                            {
+                                "event_date": pay_date,
+                                "user_name": user_name,
+                                "income_name": income_name,
+                                "amount": amount,
+                                "event_type": "现金流入",
+                                "status": "预计",
+                            }
+                        )
+
+                if current_month.month == 12:
+                    current_month = date(current_month.year + 1, 1, 1)
+                else:
+                    current_month = date(current_month.year, current_month.month + 1, 1)
+
+    return pd.DataFrame(events)
+
+
+def generate_credit_due_schedule(source_df: pd.DataFrame, cards_df: pd.DataFrame) -> pd.DataFrame:
+    if source_df.empty:
+        return pd.DataFrame()
+
+    credit_df = source_df[
+        (source_df["payment_method"] == "信用卡")
+        & (source_df["card_name"].fillna("") != "")
+    ].copy()
+
+    if credit_df.empty:
+        return pd.DataFrame()
+
+    if cards_df.empty:
+        credit_df["owner_name"] = ""
+        credit_df["payment_due_day"] = 1
+        credit_df["cashback_rate"] = 0.0
+    else:
+        credit_df = credit_df.merge(
+            cards_df[["card_name", "owner_name", "payment_due_day", "cashback_rate"]],
+            on="card_name",
+            how="left",
+        )
+        credit_df["payment_due_day"] = pd.to_numeric(
+            credit_df["payment_due_day"], errors="coerce"
+        ).fillna(1).astype(int)
+        credit_df["cashback_rate"] = pd.to_numeric(
+            credit_df["cashback_rate"], errors="coerce"
+        ).fillna(0.0)
+
+    credit_df["due_date"] = credit_df.apply(
+        lambda row: next_due_date_after(
+            pd.to_datetime(row["expense_date"]).date(),
+            int(row["payment_due_day"]),
+        ),
+        axis=1,
+    )
+
+    credit_df["estimated_cashback"] = credit_df["adjusted_amount"] * credit_df["cashback_rate"]
+
+    return credit_df
 def load_cashback_rules() -> pd.DataFrame:
     try:
         response = (
@@ -475,6 +709,8 @@ categories_df = load_categories()
 expenses_df = load_expenses()
 cards_df = ensure_credit_card_columns(load_credit_cards())
 cashback_rules_df = ensure_cashback_rule_columns(load_cashback_rules())
+paychecks_df = ensure_paycheck_columns(load_paychecks())
+
 st.markdown(
     """
 <div class='top-banner'>
@@ -990,115 +1226,286 @@ with tab1:
                             st.error(f"修改失败：{e}")
 with tab2:
     st.subheader("💵 现金流统计")
-    st.caption("当前版本先按支出视角展示：非信用卡=已实际流出，信用卡=待还款。")
+    st.caption("逻辑：现金/借记卡当天流出；信用卡按还款日自动计入现金流；paycheck 按规则自动生成。")
 
-    if filtered_df.empty:
-        st.info("当前筛选条件下暂无数据。")
+    # 日期区间
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        range_start = pd.to_datetime(date_range[0]).date()
+        range_end = pd.to_datetime(date_range[1]).date()
     else:
-        cash_df = filtered_df.copy()
+        today = date.today()
+        range_start = today.replace(day=1)
+        range_end = today
 
-        # 单个用户时：个人全额 + 共同/2
-        # 全部用户时：全额
-        if selected_user_filter == "全部":
-            cash_df["adjusted_amount"] = cash_df["amount"]
-        else:
-            cash_df["adjusted_amount"] = cash_df["amount"]
-            cash_df.loc[cash_df["bill_type"] == "共同", "adjusted_amount"] = (
-                cash_df.loc[cash_df["bill_type"] == "共同", "amount"] / 2
+    # ===== 现金流入规则管理 =====
+    st.markdown("### 💰 现金流入规则（Paycheck）")
+
+    paycheck_owner_options = ["共同"] + users_df["name"].dropna().unique().tolist() if not users_df.empty else ["共同"]
+
+    with st.form("add_paycheck_form", clear_on_submit=True):
+        p1, p2, p3 = st.columns(3)
+        with p1:
+            paycheck_user = st.selectbox("属于谁", paycheck_owner_options)
+        with p2:
+            income_name = st.text_input("收入名称", value="工资")
+        with p3:
+            paycheck_amount = st.number_input("每次金额", min_value=0.0, step=100.0, format="%.2f")
+
+        p4, p5, p6 = st.columns(3)
+        with p4:
+            paycheck_frequency = st.selectbox(
+                "频率",
+                ["biweekly", "twice_a_month", "monthly"],
+                format_func=lambda x: {
+                    "biweekly": "每两周",
+                    "twice_a_month": "每月两次",
+                    "monthly": "每月一次",
+                }[x],
+            )
+        with p5:
+            paycheck_start_date = st.date_input("起始发薪日", value=date.today(), key="paycheck_start_date")
+        with p6:
+            paycheck_second_day = st.number_input(
+                "第二个发薪日（仅每月两次）",
+                min_value=1,
+                max_value=31,
+                value=30,
+                step=1,
             )
 
-        # 顶部卡片
-        actual_cash_out = cash_df[cash_df["payment_method"] != "信用卡"]["adjusted_amount"].sum()
-        credit_df = cash_df[cash_df["payment_method"] == "信用卡"].copy()
-        pending_card_payment = credit_df["adjusted_amount"].sum() if not credit_df.empty else 0.0
-        total_outflow_view = actual_cash_out + pending_card_payment
+        submitted_paycheck = st.form_submit_button("保存 paycheck 规则", use_container_width=True)
 
-        c1, c2, c3 = st.columns(3)
+    if submitted_paycheck:
+        result = add_paycheck_rule(
+            paycheck_user,
+            income_name,
+            float(paycheck_amount),
+            paycheck_frequency,
+            paycheck_start_date,
+            int(paycheck_second_day) if paycheck_frequency == "twice_a_month" else None,
+        )
+        if result == "ok":
+            st.success("paycheck 规则已保存。")
+            st.rerun()
+        else:
+            st.error(result)
+
+    if paychecks_df.empty:
+        st.info("还没有 paycheck 规则。")
+    else:
+        st.dataframe(
+            paychecks_df.rename(
+                columns={
+                    "user_name": "属于谁",
+                    "income_name": "收入名称",
+                    "amount": "每次金额",
+                    "frequency": "频率",
+                    "start_date": "起始发薪日",
+                    "second_day": "第二个发薪日",
+                    "is_active": "启用中",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("---")
+
+    # ===== 为现金流单独准备数据源：不要先按 expense_date 切掉 =====
+    cash_source_df = df.copy()
+
+    if selected_user_filter != "全部":
+        cash_source_df = cash_source_df[
+            (cash_source_df["user_name"] == selected_user_filter)
+            | (cash_source_df["bill_type"] == "共同")
+        ]
+
+    if selected_bill_filter != "全部":
+        cash_source_df = cash_source_df[cash_source_df["bill_type"] == selected_bill_filter]
+
+    if selected_parent_filter != "全部":
+        cash_source_df = cash_source_df[cash_source_df["parent_category"] == selected_parent_filter]
+
+    if selected_sub_filter != "全部":
+        cash_source_df = cash_source_df[cash_source_df["sub_category"] == selected_sub_filter]
+
+    if cash_source_df.empty and paychecks_df.empty:
+        st.info("当前筛选条件下暂无数据。")
+    else:
+        # 单个用户：个人全额 + 共同/2
+        if cash_source_df.empty:
+            cash_source_df = pd.DataFrame(columns=df.columns.tolist() + ["adjusted_amount"])
+        else:
+            if selected_user_filter == "全部":
+                cash_source_df["adjusted_amount"] = cash_source_df["amount"]
+            else:
+                cash_source_df["adjusted_amount"] = cash_source_df["amount"]
+                cash_source_df.loc[cash_source_df["bill_type"] == "共同", "adjusted_amount"] = (
+                    cash_source_df.loc[cash_source_df["bill_type"] == "共同", "amount"] / 2
+                )
+
+        # ===== 直接支付：消费日就是现金流日 =====
+        direct_outflow_all = cash_source_df[cash_source_df["payment_method"] != "信用卡"].copy()
+        if not direct_outflow_all.empty:
+            direct_outflow_all["event_date"] = pd.to_datetime(direct_outflow_all["expense_date"]).dt.date
+
+        direct_outflow_in_range = direct_outflow_all[
+            (direct_outflow_all["event_date"] >= range_start)
+            & (direct_outflow_all["event_date"] <= range_end)
+        ].copy() if not direct_outflow_all.empty else pd.DataFrame()
+
+        # ===== 信用卡：按还款日自动算入现金流 =====
+        credit_due_all = generate_credit_due_schedule(cash_source_df, cards_df)
+
+        credit_due_in_range = credit_due_all[
+            (credit_due_all["due_date"] >= range_start)
+            & (credit_due_all["due_date"] <= range_end)
+        ].copy() if not credit_due_all.empty else pd.DataFrame()
+
+        # 当前待还：到区间结束日之后才到期的
+        pending_credit_df = credit_due_all[
+            credit_due_all["due_date"] > range_end
+        ].copy() if not credit_due_all.empty else pd.DataFrame()
+
+        # ===== paycheck 事件 =====
+        active_paychecks_df = paychecks_df[paychecks_df["is_active"] == True].copy() if not paychecks_df.empty else pd.DataFrame()
+
+        if not active_paychecks_df.empty and selected_user_filter != "全部":
+            active_paychecks_df = active_paychecks_df[
+                active_paychecks_df["user_name"].isin([selected_user_filter, "共同"])
+            ].copy()
+
+        paycheck_events_df = generate_paycheck_events(active_paychecks_df, range_start, range_end)
+
+        # ===== 顶部卡片 =====
+        inflow_amount = paycheck_events_df["amount"].sum() if not paycheck_events_df.empty else 0.0
+        direct_outflow_amount = direct_outflow_in_range["adjusted_amount"].sum() if not direct_outflow_in_range.empty else 0.0
+        card_outflow_amount = credit_due_in_range["adjusted_amount"].sum() if not credit_due_in_range.empty else 0.0
+        actual_outflow_amount = direct_outflow_amount + card_outflow_amount
+        pending_card_amount = pending_credit_df["adjusted_amount"].sum() if not pending_credit_df.empty else 0.0
+        net_cashflow_amount = inflow_amount - actual_outflow_amount
+
+        c1, c2, c3, c4 = st.columns(4)
         c1.markdown(
-            f"<div class='stat-card'><div class='stat-label'>已实际流出</div><div class='stat-value'>¥{actual_cash_out:,.2f}</div></div>",
+            f"<div class='stat-card'><div class='stat-label'>预计流入</div><div class='stat-value'>¥{inflow_amount:,.2f}</div></div>",
             unsafe_allow_html=True,
         )
         c2.markdown(
-            f"<div class='stat-card'><div class='stat-label'>信用卡待还</div><div class='stat-value'>¥{pending_card_payment:,.2f}</div></div>",
+            f"<div class='stat-card'><div class='stat-label'>已实际流出</div><div class='stat-value'>¥{actual_outflow_amount:,.2f}</div></div>",
             unsafe_allow_html=True,
         )
         c3.markdown(
-            f"<div class='stat-card'><div class='stat-label'>总流出视角</div><div class='stat-value'>¥{total_outflow_view:,.2f}</div></div>",
+            f"<div class='stat-card'><div class='stat-label'>当前信用卡待还</div><div class='stat-value'>¥{pending_card_amount:,.2f}</div></div>",
+            unsafe_allow_html=True,
+        )
+        c4.markdown(
+            f"<div class='stat-card'><div class='stat-label'>预计净现金流</div><div class='stat-value'>¥{net_cashflow_amount:,.2f}</div></div>",
             unsafe_allow_html=True,
         )
 
+        # ===== 现金流日历 / 日程表 =====
+        st.markdown("### 🗓️ 现金流日程表")
+
+        schedule_frames = []
+
+        if not paycheck_events_df.empty:
+            inflow_schedule = paycheck_events_df.copy()
+            inflow_schedule["日期"] = inflow_schedule["event_date"].astype(str)
+            inflow_schedule["类型"] = "现金流入"
+            inflow_schedule["说明"] = inflow_schedule["user_name"] + " - " + inflow_schedule["income_name"]
+            inflow_schedule["金额"] = inflow_schedule["amount"]
+            inflow_schedule["状态"] = "预计"
+            schedule_frames.append(inflow_schedule[["日期", "类型", "说明", "金额", "状态"]])
+
+        if not direct_outflow_in_range.empty:
+            direct_schedule = direct_outflow_in_range.copy()
+            direct_schedule["日期"] = direct_schedule["event_date"].astype(str)
+            direct_schedule["类型"] = "已实际流出"
+            direct_schedule["说明"] = (
+                direct_schedule["user_name"].astype(str)
+                + " - "
+                + direct_schedule["parent_category"].astype(str)
+                + "-"
+                + direct_schedule["sub_category"].astype(str)
+            )
+            direct_schedule["金额"] = direct_schedule["adjusted_amount"]
+            direct_schedule["状态"] = "已发生"
+            schedule_frames.append(direct_schedule[["日期", "类型", "说明", "金额", "状态"]])
+
+        if not credit_due_in_range.empty:
+            card_schedule = credit_due_in_range.copy()
+            card_schedule["日期"] = card_schedule["due_date"].astype(str)
+            card_schedule["类型"] = "信用卡自动还款"
+            card_schedule["说明"] = (
+                card_schedule["card_name"].astype(str)
+                + " - "
+                + card_schedule["parent_category"].astype(str)
+                + "-"
+                + card_schedule["sub_category"].astype(str)
+            )
+            card_schedule["金额"] = card_schedule["adjusted_amount"]
+            card_schedule["状态"] = "按还款日自动计入"
+            schedule_frames.append(card_schedule[["日期", "类型", "说明", "金额", "状态"]])
+
+        if schedule_frames:
+            schedule_df = pd.concat(schedule_frames, ignore_index=True)
+            schedule_df["日期_dt"] = pd.to_datetime(schedule_df["日期"], errors="coerce")
+            schedule_df = schedule_df.sort_values(["日期_dt", "类型"]).drop(columns=["日期_dt"])
+            st.dataframe(schedule_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("当前日期区间内暂无现金流日程。")
+
+        # ===== 已实际流出（月度汇总） =====
         st.markdown("### 已实际流出（月度汇总）")
 
-        actual_outflow_df = cash_df[cash_df["payment_method"] != "信用卡"].copy()
+        actual_frames = []
 
-        if actual_outflow_df.empty:
-            st.info("当前没有已实际流出记录。")
-        else:
-            actual_outflow_df["月份"] = actual_outflow_df["expense_date"].dt.to_period("M").astype(str)
+        if not direct_outflow_in_range.empty:
+            tmp1 = direct_outflow_in_range.copy()
+            tmp1["event_date"] = pd.to_datetime(tmp1["event_date"])
+            tmp1["金额"] = tmp1["adjusted_amount"]
+            actual_frames.append(tmp1[["event_date", "金额"]])
+
+        if not credit_due_in_range.empty:
+            tmp2 = credit_due_in_range.copy()
+            tmp2["event_date"] = pd.to_datetime(tmp2["due_date"])
+            tmp2["金额"] = tmp2["adjusted_amount"]
+            actual_frames.append(tmp2[["event_date", "金额"]])
+
+        if actual_frames:
+            actual_events_df = pd.concat(actual_frames, ignore_index=True)
+            actual_events_df["月份"] = actual_events_df["event_date"].dt.to_period("M").astype(str)
 
             actual_monthly_summary = (
-                actual_outflow_df.groupby("月份", as_index=False)["adjusted_amount"]
+                actual_events_df.groupby("月份", as_index=False)["金额"]
                 .sum()
                 .sort_values("月份", ascending=False)
-                .rename(columns={"adjusted_amount": "已实际流出金额"})
+                .rename(columns={"金额": "已实际流出金额"})
             )
-
             st.dataframe(actual_monthly_summary, use_container_width=True, hide_index=True)
+        else:
+            st.info("当前没有已实际流出记录。")
 
+        # ===== 信用卡待还（当前欠款汇总） =====
         st.markdown("### 信用卡待还（当前欠款汇总）")
 
-        credit_outstanding_df = cash_df[cash_df["payment_method"] == "信用卡"].copy()
-
-        if credit_outstanding_df.empty:
+        if pending_credit_df.empty:
             st.info("当前没有信用卡待还记录。")
         else:
-            # 合并信用卡基础信息（默认返现、属于谁、还款日）
-            if not cards_df.empty:
-                credit_outstanding_df = credit_outstanding_df.merge(
-                    cards_df[["card_name", "owner_name", "payment_due_day", "cashback_rate"]],
-                    on="card_name",
-                    how="left"
-                )
-            else:
-                credit_outstanding_df["owner_name"] = ""
-                credit_outstanding_df["payment_due_day"] = None
-                credit_outstanding_df["cashback_rate"] = 0.0
-
-            # 建立规则映射： (卡名, 一级分类) -> 返现比例
-            rule_map = {}
-            if not cashback_rules_df.empty:
-                for _, row in cashback_rules_df.iterrows():
-                    rule_map[(str(row["card_name"]), str(row["category_name"]))] = float(row["cashback_rate"])
-
-            # 逐笔计算实际适用返现比例
-            def get_effective_cashback_rate(row):
-                key = (str(row["card_name"]), str(row["parent_category"]))
-                if key in rule_map:
-                    return rule_map[key]
-                return float(row["cashback_rate"]) if pd.notna(row["cashback_rate"]) else 0.0
-
-            credit_outstanding_df["effective_cashback_rate"] = credit_outstanding_df.apply(
-                get_effective_cashback_rate,
-                axis=1
-            )
-
-            credit_outstanding_df["预计cashback"] = (
-                credit_outstanding_df["adjusted_amount"] * credit_outstanding_df["effective_cashback_rate"]
-            )
-
-            credit_bill_summary = (
-                credit_outstanding_df.groupby("card_name", as_index=False)
+            pending_summary = (
+                pending_credit_df.groupby("card_name", as_index=False)
                 .agg(
                     当前待还金额=("adjusted_amount", "sum"),
                     属于谁=("owner_name", "first"),
                     每月还款日=("payment_due_day", "first"),
-                    预计cashback=("预计cashback", "sum"),
+                    下一次还款日期=("due_date", "min"),
+                    预计cashback=("estimated_cashback", "sum"),
                 )
                 .sort_values("当前待还金额", ascending=False)
                 .rename(columns={"card_name": "信用卡"})
             )
 
-            st.dataframe(credit_bill_summary, use_container_width=True, hide_index=True)
+            st.dataframe(pending_summary, use_container_width=True, hide_index=True)
 
 with tab3:
     st.subheader("💳 信用卡管理")
