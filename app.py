@@ -8,7 +8,7 @@ from supabase import Client, create_client
 st.set_page_config(page_title="情侣记账本", page_icon="💸", layout="wide")
 
 FIXED_PARENT_CATEGORIES = ["餐饮", "交通", "居家", "购物", "娱乐", "医疗", "学习", "其他"]
-PAYMENT_METHODS = ["现金/借记卡", "信用卡", "转账", "其他"]
+PAYMENT_METHODS = ["现金/借记卡", "信用卡", "其他"]
 
 st.markdown(
     """
@@ -499,16 +499,30 @@ else:
     st.dataframe(category_summary, use_container_width=True, hide_index=True)
 
 st.subheader("📈 可视化统计（饼图）")
-if filtered_df.empty:
+
+# 关键：图表数据单独按“当前用户”过滤
+chart_base_df = filtered_df.copy()
+
+# 如果你希望：切换用户后，图表显示【该用户个人 + 共同】
+if selected_user_filter != "全部":
+    chart_base_df = chart_base_df[
+        (chart_base_df["user_name"] == selected_user_filter)
+        | (chart_base_df["bill_type"] == "共同")
+    ]
+
+if chart_base_df.empty:
     st.info("当前筛选条件下暂无可视化数据。")
 else:
-    chart_parent_options = sorted(filtered_df["parent_category"].dropna().unique().tolist())
+    chart_parent_options = sorted(chart_base_df["parent_category"].dropna().unique().tolist())
     selected_chart_parents = st.multiselect(
         "选择要显示的一级分类（可多选）",
         options=chart_parent_options,
         default=chart_parent_options,
+        key="chart_parent_filter",
     )
-    chart_df = filtered_df[filtered_df["parent_category"].isin(selected_chart_parents)].copy()
+
+    chart_df = chart_base_df[chart_base_df["parent_category"].isin(selected_chart_parents)].copy()
+
     if chart_df.empty:
         st.info("你当前没有选择任何一级分类。")
     else:
@@ -517,17 +531,23 @@ else:
             .sum()
             .sort_values("amount", ascending=False)
         )
+
         pie = (
             alt.Chart(chart_summary)
             .mark_arc(innerRadius=40)
             .encode(
                 color=alt.Color("parent_category:N", title="一级分类"),
-                tooltip=["parent_category", "sub_category", alt.Tooltip("amount:Q", format=".2f")],
                 theta=alt.Theta("amount:Q", title="金额"),
+                tooltip=[
+                    "parent_category",
+                    "sub_category",
+                    alt.Tooltip("amount:Q", format=".2f"),
+                ],
             )
             .properties(height=360)
             .interactive()
         )
+
         labels = (
             alt.Chart(chart_summary)
             .mark_text(radius=135, size=12)
@@ -537,8 +557,8 @@ else:
                 color=alt.value("#334155"),
             )
         )
-        st.altair_chart((pie + labels), use_container_width=True)
 
+        st.altair_chart(pie + labels, use_container_width=True)
 st.subheader("🧾 记录表格区")
 if filtered_df.empty:
     st.info("当前筛选条件下暂无记录。")
@@ -609,3 +629,118 @@ else:
                     st.rerun()
                 else:
                     st.error(delete_result)
+with st.expander("✏️ 修改记录（可选）", expanded=False):
+    edit_options_df = filtered_df.sort_values(["expense_date", "id"], ascending=[False, False]).copy()
+    if edit_options_df.empty:
+        st.info("当前没有可修改的记录。")
+    else:
+        edit_options_df["expense_date_str"] = edit_options_df["expense_date"].dt.strftime("%Y-%m-%d")
+        edit_options_df["edit_label"] = (
+            "ID:"
+            + edit_options_df["id"].astype(str)
+            + " | "
+            + edit_options_df["expense_date_str"].astype(str)
+            + " | "
+            + edit_options_df["user_name"].astype(str)
+            + " | "
+            + edit_options_df["parent_category"].astype(str)
+            + "-"
+            + edit_options_df["sub_category"].astype(str)
+            + " | ¥"
+            + edit_options_df["amount"].map(lambda x: f"{x:,.2f}")
+        )
+
+        selected_edit_label = st.selectbox("选择要修改的记录", edit_options_df["edit_label"].tolist(), key="edit_pick")
+        edit_row = edit_options_df.loc[edit_options_df["edit_label"] == selected_edit_label].iloc[0]
+
+        # 行1：日期、金额、账单类型
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            edit_date = st.date_input(
+                "新日期",
+                value=pd.to_datetime(edit_row["expense_date"]).date(),
+                key="edit_date",
+            )
+        with e2:
+            edit_amount = st.number_input(
+                "新金额",
+                min_value=0.0,
+                value=float(edit_row["amount"]),
+                step=1.0,
+                format="%.2f",
+                key="edit_amount",
+            )
+        with e3:
+            old_bill_type = str(edit_row["bill_type"]) if pd.notna(edit_row["bill_type"]) else "个人"
+            edit_bill_type = st.selectbox(
+                "新账单类型",
+                ["个人", "共同"],
+                index=0 if old_bill_type == "个人" else 1,
+                key="edit_bill_type",
+            )
+
+        # 行2：一级分类、二级分类、支付方式
+        e4, e5, e6 = st.columns(3)
+        with e4:
+            old_parent = str(edit_row["parent_category"]) if pd.notna(edit_row["parent_category"]) else "其他"
+            parent_idx = FIXED_PARENT_CATEGORIES.index(old_parent) if old_parent in FIXED_PARENT_CATEGORIES else 0
+            edit_parent = st.selectbox("新一级分类", FIXED_PARENT_CATEGORIES, index=parent_idx, key="edit_parent")
+
+        sub_opts = get_sub_options_for_parent(categories_df, edit_parent)
+        with e5:
+            old_sub = str(edit_row["sub_category"]) if pd.notna(edit_row["sub_category"]) else ""
+            sub_idx = sub_opts.index(old_sub) if (old_sub in sub_opts) else 0
+            edit_sub = st.selectbox("新二级分类", sub_opts if sub_opts else [""], index=sub_idx, key="edit_sub")
+
+        with e6:
+            old_pay = str(edit_row["payment_method"]) if ("payment_method" in edit_row and pd.notna(edit_row["payment_method"])) else "现金/借记卡"
+            pay_options = ["现金/借记卡", "信用卡", "转账", "其他"]
+            pay_idx = pay_options.index(old_pay) if old_pay in pay_options else 0
+            edit_payment_method = st.selectbox("新支付方式", pay_options, index=pay_idx, key="edit_payment_method")
+
+        # 行3：信用卡、备注
+        e7, e8 = st.columns(2)
+        with e7:
+            if edit_payment_method == "信用卡":
+                card_options = cards_df["card_name"].tolist() if (not cards_df.empty and "card_name" in cards_df.columns) else []
+                old_card = str(edit_row["card_name"]) if ("card_name" in edit_row and pd.notna(edit_row["card_name"])) else ""
+                card_idx = card_options.index(old_card) if (old_card in card_options) else 0
+                edit_card_name = (
+                    st.selectbox("新信用卡", card_options, index=card_idx, key="edit_card_name")
+                    if card_options else ""
+                )
+                if not card_options:
+                    st.info("没有可选信用卡，请先在 credit_cards 表添加。")
+            else:
+                edit_card_name = ""
+                st.text_input("新信用卡", value="非信用卡支付", disabled=True, key="edit_card_disabled")
+
+        with e8:
+            old_note = str(edit_row["note"]) if pd.notna(edit_row["note"]) else ""
+            edit_note = st.text_input("新备注", value=old_note, key="edit_note")
+
+        confirm_edit = st.checkbox("我确认要修改这条记录", value=False, key="confirm_edit")
+        if st.button("保存修改", use_container_width=True, key="save_edit_btn"):
+            if not confirm_edit:
+                st.warning("请先勾选确认修改。")
+            elif edit_payment_method == "信用卡" and not edit_card_name:
+                st.warning("信用卡支付必须选择卡片。")
+            elif not edit_sub:
+                st.warning("请先选择二级分类。")
+            else:
+                update_payload = {
+                    "expense_date": str(edit_date),
+                    "amount": float(edit_amount),
+                    "bill_type": edit_bill_type,
+                    "parent_category": edit_parent,
+                    "sub_category": edit_sub,
+                    "payment_method": edit_payment_method,
+                    "card_name": edit_card_name if edit_payment_method == "信用卡" else "",
+                    "note": edit_note.strip(),
+                }
+                try:
+                    supabase.table("expenses").update(update_payload).eq("id", int(edit_row["id"])).execute()
+                    st.success("记录已修改。")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"修改失败：{e}")
