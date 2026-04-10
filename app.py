@@ -498,67 +498,67 @@ else:
     )
     st.dataframe(category_summary, use_container_width=True, hide_index=True)
 
-st.subheader("📈 可视化统计（饼图）")
+st.subheader("📈 可视化统计（总支出分类饼图）")
 
-# 关键：图表数据单独按“当前用户”过滤
-chart_base_df = filtered_df.copy()
-
-# 如果你希望：切换用户后，图表显示【该用户个人 + 共同】
-if selected_user_filter != "全部":
-    chart_base_df = chart_base_df[
-        (chart_base_df["user_name"] == selected_user_filter)
-        | (chart_base_df["bill_type"] == "共同")
-    ]
-
-if chart_base_df.empty:
+if filtered_df.empty:
     st.info("当前筛选条件下暂无可视化数据。")
 else:
-    chart_parent_options = sorted(chart_base_df["parent_category"].dropna().unique().tolist())
-    selected_chart_parents = st.multiselect(
-        "选择要显示的一级分类（可多选）",
-        options=chart_parent_options,
-        default=chart_parent_options,
-        key="chart_parent_filter",
+    chart_df = filtered_df.copy()
+
+    # 按“总支出”逻辑重算金额：
+    # 个人账单 = 全额
+    # 共同账单 = 一半
+    chart_df["chart_amount"] = chart_df["amount"]
+    chart_df.loc[chart_df["bill_type"] == "共同", "chart_amount"] = (
+        chart_df.loc[chart_df["bill_type"] == "共同", "amount"] / 2
     )
 
-    chart_df = chart_base_df[chart_base_df["parent_category"].isin(selected_chart_parents)].copy()
+    # 按一级分类汇总
+    chart_summary = (
+        chart_df.groupby("parent_category", as_index=False)["chart_amount"]
+        .sum()
+        .sort_values("chart_amount", ascending=False)
+        .rename(columns={
+            "parent_category": "一级分类",
+            "chart_amount": "总支出"
+        })
+    )
 
-    if chart_df.empty:
-        st.info("你当前没有选择任何一级分类。")
-    else:
-        chart_summary = (
-            chart_df.groupby(["parent_category", "sub_category"], as_index=False)["amount"]
-            .sum()
-            .sort_values("amount", ascending=False)
+    total_chart_amount = chart_summary["总支出"].sum()
+    chart_summary["占比"] = chart_summary["总支出"] / total_chart_amount
+    chart_summary["标签"] = (
+        chart_summary["一级分类"]
+        + " "
+        + chart_summary["占比"].map(lambda x: f"{x:.0%}")
+    )
+
+    pie = (
+        alt.Chart(chart_summary)
+        .mark_arc(innerRadius=40)
+        .encode(
+            theta=alt.Theta("总支出:Q", title="总支出"),
+            color=alt.Color("一级分类:N", title="一级分类"),
+            tooltip=[
+                alt.Tooltip("一级分类:N", title="一级分类"),
+                alt.Tooltip("总支出:Q", title="总支出", format=".2f"),
+                alt.Tooltip("占比:Q", title="占比", format=".1%"),
+            ],
         )
+        .properties(height=380)
+    )
 
-        pie = (
-            alt.Chart(chart_summary)
-            .mark_arc(innerRadius=40)
-            .encode(
-                color=alt.Color("parent_category:N", title="一级分类"),
-                theta=alt.Theta("amount:Q", title="金额"),
-                tooltip=[
-                    "parent_category",
-                    "sub_category",
-                    alt.Tooltip("amount:Q", format=".2f"),
-                ],
-            )
-            .properties(height=360)
-            .interactive()
+    labels = (
+        alt.Chart(chart_summary)
+        .mark_text(radius=145, size=12)
+        .encode(
+            theta=alt.Theta("总支出:Q"),
+            text=alt.Text("标签:N"),
+            color=alt.value("#334155"),
         )
+    )
 
-        labels = (
-            alt.Chart(chart_summary)
-            .mark_text(radius=135, size=12)
-            .encode(
-                theta=alt.Theta("amount:Q"),
-                text=alt.Text("amount:Q", format=".1f"),
-                color=alt.value("#334155"),
-            )
-        )
-
-        st.altair_chart(pie + labels, use_container_width=True)
+    st.altair_chart(pie + labels, use_container_width=True)
+    
 st.subheader("🧾 记录表格区")
 if filtered_df.empty:
     st.info("当前筛选条件下暂无记录。")
