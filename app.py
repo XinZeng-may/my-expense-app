@@ -505,13 +505,16 @@ if filtered_df.empty:
 else:
     chart_df = filtered_df.copy()
 
-    # 按“总支出”逻辑重算金额：
-    # 个人账单 = 全额
-    # 共同账单 = 一半
-    chart_df["chart_amount"] = chart_df["amount"]
-    chart_df.loc[chart_df["bill_type"] == "共同", "chart_amount"] = (
-        chart_df.loc[chart_df["bill_type"] == "共同", "amount"] / 2
-    )
+    # 饼图口径：
+    # 全部用户 => 个人 + 共同
+    # 单个用户 => 该用户个人 + 共同/2
+    if selected_user_filter == "全部":
+        chart_df["chart_amount"] = chart_df["amount"]
+    else:
+        chart_df["chart_amount"] = chart_df["amount"]
+        chart_df.loc[chart_df["bill_type"] == "共同", "chart_amount"] = (
+            chart_df.loc[chart_df["bill_type"] == "共同", "amount"] / 2
+        )
 
     # 按一级分类汇总
     chart_summary = (
@@ -524,40 +527,43 @@ else:
         })
     )
 
-    total_chart_amount = chart_summary["总支出"].sum()
-    chart_summary["占比"] = chart_summary["总支出"] / total_chart_amount
-    chart_summary["标签"] = (
-        chart_summary["一级分类"]
-        + " "
-        + chart_summary["占比"].map(lambda x: f"{x:.0%}")
-    )
-
-    pie = (
-        alt.Chart(chart_summary)
-        .mark_arc(innerRadius=40)
-        .encode(
-            theta=alt.Theta("总支出:Q", title="总支出"),
-            color=alt.Color("一级分类:N", title="一级分类"),
-            tooltip=[
-                alt.Tooltip("一级分类:N", title="一级分类"),
-                alt.Tooltip("总支出:Q", title="总支出", format=".2f"),
-                alt.Tooltip("占比:Q", title="占比", format=".1%"),
-            ],
+    if chart_summary.empty:
+        st.info("当前筛选条件下暂无可视化数据。")
+    else:
+        total_chart_amount = chart_summary["总支出"].sum()
+        chart_summary["占比"] = chart_summary["总支出"] / total_chart_amount
+        chart_summary["标签"] = (
+            chart_summary["一级分类"]
+            + " "
+            + chart_summary["占比"].map(lambda x: f"{x:.0%}")
         )
-        .properties(height=380)
-    )
 
-    labels = (
-        alt.Chart(chart_summary)
-        .mark_text(radius=145, size=12)
-        .encode(
-            theta=alt.Theta("总支出:Q"),
-            text=alt.Text("标签:N"),
-            color=alt.value("#334155"),
+        pie = (
+            alt.Chart(chart_summary)
+            .mark_arc(innerRadius=40)
+            .encode(
+                theta=alt.Theta("总支出:Q", title="总支出"),
+                color=alt.Color("一级分类:N", title="一级分类"),
+                tooltip=[
+                    alt.Tooltip("一级分类:N", title="一级分类"),
+                    alt.Tooltip("总支出:Q", title="总支出", format=".2f"),
+                    alt.Tooltip("占比:Q", title="占比", format=".1%"),
+                ],
+            )
+            .properties(height=380)
         )
-    )
 
-    st.altair_chart(pie + labels, use_container_width=True)
+        labels = (
+            alt.Chart(chart_summary)
+            .mark_text(radius=145, size=12)
+            .encode(
+                theta=alt.Theta("总支出:Q"),
+                text=alt.Text("标签:N"),
+                color=alt.value("#334155"),
+            )
+        )
+
+        st.altair_chart(pie + labels, use_container_width=True)
     
 st.subheader("🧾 记录表格区")
 if filtered_df.empty:
