@@ -118,6 +118,41 @@ def add_sub_category(parent_category: str, sub_category: str) -> str:
     return "ok"
 
 
+
+
+def ensure_expense_columns(df: pd.DataFrame) -> pd.DataFrame:
+    expected_defaults = {
+        "expense_date": pd.NaT,
+        "amount": 0.0,
+        "user_name": "",
+        "bill_type": "个人",
+        "parent_category": "其他",
+        "sub_category": "未分类",
+        "note": "",
+        "created_at": "",
+    }
+
+    normalized = df.copy()
+    for col, default in expected_defaults.items():
+        if col not in normalized.columns:
+            normalized[col] = default
+
+    normalized["bill_type"] = normalized["bill_type"].fillna("个人").astype(str)
+    normalized.loc[~normalized["bill_type"].isin(["个人", "共同"]), "bill_type"] = "个人"
+
+    normalized["parent_category"] = normalized["parent_category"].fillna("其他").astype(str)
+    normalized.loc[~normalized["parent_category"].isin(FIXED_PARENT_CATEGORIES), "parent_category"] = "其他"
+
+    normalized["sub_category"] = normalized["sub_category"].fillna("未分类").astype(str)
+    normalized["user_name"] = normalized["user_name"].fillna("").astype(str)
+    normalized["note"] = normalized["note"].fillna("").astype(str)
+
+    normalized["amount"] = pd.to_numeric(normalized["amount"], errors="coerce").fillna(0.0)
+    normalized["expense_date"] = pd.to_datetime(normalized["expense_date"], errors="coerce")
+
+    return normalized
+
+
 def add_expense_record(
     expense_date: date,
     amount: float,
@@ -274,9 +309,7 @@ if expenses_df.empty:
     st.info("还没有记录，先添加第一笔吧。")
     st.stop()
 
-df = expenses_df.copy()
-df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
-df["expense_date"] = pd.to_datetime(df["expense_date"], errors="coerce")
+df = ensure_expense_columns(expenses_df)
 filtered_df = df.copy()
 
 if selected_user_filter != "全部":
