@@ -342,18 +342,28 @@ def apply_cashback_rules(
 ) -> pd.DataFrame:
     result = credit_df.copy()
 
-    # 默认返现：来自信用卡主表
     default_rate_map = {}
     if not cards_df.empty and "card_name" in cards_df.columns and "cashback_rate" in cards_df.columns:
         for _, row in cards_df.iterrows():
             default_rate_map[str(row["card_name"])] = float(row["cashback_rate"] or 0)
 
-    # 分类返现：来自规则表
     rule_map = {}
     if not cashback_rules_df.empty:
         for _, row in cashback_rules_df.iterrows():
             key = (str(row["card_name"]), str(row["category_name"]))
             rule_map[key] = float(row["cashback_rate"] or 0)
+
+    def get_effective_rate(row):
+        key = (str(row["card_name"]), str(row["parent_category"]))
+        if key in rule_map:
+            return rule_map[key]
+        return default_rate_map.get(str(row["card_name"]), 0.0)
+
+    result["effective_cashback_rate"] = result.apply(get_effective_rate, axis=1)
+    result["estimated_cashback"] = result["adjusted_amount"] * result["effective_cashback_rate"]
+
+    return result
+    
 def load_credit_card_payments() -> pd.DataFrame:
     try:
         response = (
