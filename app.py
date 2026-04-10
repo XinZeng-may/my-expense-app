@@ -1024,15 +1024,15 @@ with tab1:
 
     s1, s2, s3, s4 = st.columns(4)
     s1.markdown(
-        f"<div class='stat-card'><div class='stat-label'>{total_label}</div><div class='stat-value'>¥{total_amount:,.2f}</div></div>",
+        f"<div class='stat-card'><div class='stat-label'>{total_label}</div><div class='stat-value'>${total_amount:,.2f}</div></div>",
         unsafe_allow_html=True,
     )
     s2.markdown(
-        f"<div class='stat-card'><div class='stat-label'>个人支出</div><div class='stat-value'>¥{personal_amount:,.2f}</div></div>",
+        f"<div class='stat-card'><div class='stat-label'>个人支出</div><div class='stat-value'>${personal_amount:,.2f}</div></div>",
         unsafe_allow_html=True,
     )
     s3.markdown(
-        f"<div class='stat-card'><div class='stat-label'>共同支出</div><div class='stat-value'>¥{shared_amount:,.2f}</div></div>",
+        f"<div class='stat-card'><div class='stat-label'>共同支出</div><div class='stat-value'>${shared_amount:,.2f}</div></div>",
         unsafe_allow_html=True,
     )
     s4.markdown(
@@ -1161,7 +1161,7 @@ with tab1:
                 + delete_options_df["parent_category"].astype(str)
                 + "-"
                 + delete_options_df["sub_category"].astype(str)
-                + " | ¥"
+                + " | $"
                 + delete_options_df["amount"].map(lambda x: f"{x:,.2f}")
             )
 
@@ -1206,7 +1206,7 @@ with tab1:
                     + edit_options_df["parent_category"].astype(str)
                     + "-"
                     + edit_options_df["sub_category"].astype(str)
-                    + " | ¥"
+                    + " | $"
                     + edit_options_df["amount"].map(lambda x: f"{x:,.2f}")
                 )
 
@@ -1510,7 +1510,7 @@ with tab2:
             outstanding_card_names,
             key="repay_card_preview"
         )
-        st.info(f"当前 {selected_repay_card_preview} 待还金额：¥{outstanding_map.get(selected_repay_card_preview, 0):,.2f}")
+        st.info(f"当前 {selected_repay_card_preview} 待还金额：${outstanding_map.get(selected_repay_card_preview, 0):,.2f}")
 
         with st.form("add_credit_card_payment_form", clear_on_submit=True):
             rp1, rp2, rp3 = st.columns(3)
@@ -1707,19 +1707,19 @@ with tab2:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.markdown(
-        f"<div class='stat-card'><div class='stat-label'>预计流入</div><div class='stat-value'>¥{inflow_amount:,.2f}</div></div>",
+        f"<div class='stat-card'><div class='stat-label'>预计流入</div><div class='stat-value'>${inflow_amount:,.2f}</div></div>",
         unsafe_allow_html=True,
     )
     c2.markdown(
-        f"<div class='stat-card'><div class='stat-label'>已实际流出</div><div class='stat-value'>¥{actual_outflow_amount:,.2f}</div></div>",
+        f"<div class='stat-card'><div class='stat-label'>已实际流出</div><div class='stat-value'>${actual_outflow_amount:,.2f}</div></div>",
         unsafe_allow_html=True,
     )
     c3.markdown(
-        f"<div class='stat-card'><div class='stat-label'>当前信用卡待还</div><div class='stat-value'>¥{pending_card_amount:,.2f}</div></div>",
+        f"<div class='stat-card'><div class='stat-label'>当前信用卡待还</div><div class='stat-value'>${pending_card_amount:,.2f}</div></div>",
         unsafe_allow_html=True,
     )
     c4.markdown(
-        f"<div class='stat-card'><div class='stat-label'>预计净现金流</div><div class='stat-value'>¥{net_cashflow_amount:,.2f}</div></div>",
+        f"<div class='stat-card'><div class='stat-label'>预计净现金流</div><div class='stat-value'>${net_cashflow_amount:,.2f}</div></div>",
         unsafe_allow_html=True,
     )
 
