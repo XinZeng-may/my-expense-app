@@ -34,11 +34,20 @@ supabase = init_supabase()
 
 
 def load_table_df(table_name: str, order_col: str | None = None, desc: bool = False) -> pd.DataFrame:
-    q = supabase.table(table_name).select("*")
-    if order_col:
-        q = q.order(order_col, desc=desc)
-    res = q.execute()
-    return pd.DataFrame(res.data or [])
+    try:
+        q = supabase.table(table_name).select("*")
+        if order_col:
+            q = q.order(order_col, desc=desc)
+        res = q.execute()
+        return pd.DataFrame(res.data or [])
+    except Exception:
+        try:
+            # 兼容：部分环境缺失排序列，降级为不排序读取
+            res = supabase.table(table_name).select("*").execute()
+            return pd.DataFrame(res.data or [])
+        except Exception:
+            # 兼容：表尚未创建时，返回空表避免整个页面崩溃
+            return pd.DataFrame()
 
 
 def add_user(name: str) -> str:
@@ -90,6 +99,16 @@ def add_expense_record(payload: dict) -> str:
         return "ok"
     except Exception as e:
         return f"保存消费失败：{e}"
+
+
+def update_expense_record(expense_id: int, payload: dict) -> str:
+    if expense_id <= 0:
+        return "更新失败：无效记录ID"
+    try:
+        supabase.table("expenses").update(payload).eq("id", int(expense_id)).execute()
+        return "ok"
+    except Exception as e:
+        return f"更新失败：{e}"
 
 
 def add_cashflow_record(payload: dict) -> str:
@@ -218,11 +237,109 @@ with page1:
                 st.success("已保存") if r == "ok" else st.error(r)
                 if r == "ok":
                     st.rerun()
+
+        st.markdown("---")
+        st.subheader("筛选与统计")
+        f1, f2 = st.columns(2)
+        with f1:
+            p1_filter_user = st.selectbox("按用户筛选", ["全部"] + users_df["name"].tolist(), key="p1_filter_user")
+        with f2:
+            p1_filter_bill = st.selectbox("按账单类型筛选", ["全部", "个人", "共同"], key="p1_filter_bill")
+
+        show_df = expenses_df.copy()
+        if not show_df.empty:
+            show_df["amount"] = pd.to_numeric(show_df["amount"], errors="coerce").fillna(0.0)
+            if p1_filter_user != "全部":
+                show_df = show_df[show_df["user_name"] == p1_filter_user]
+            if p1_filter_bill != "全部":
+                show_df = show_df[show_df["bill_type"] == p1_filter_bill]
+
+            st.subheader("可视化统计（随用户筛选变化）")
+            pie_source = (
+                show_df.groupby(["parent_category", "sub_category"], as_index=False)["amount"]
+                .sum()
+                .sort_values("amount", ascending=False)
+            )
+            if pie_source.empty:
+                st.info("当前筛选下无图表数据")
+            else:
+                pie = (
+                    alt.Chart(pie_source)
+                    .mark_arc(innerRadius=40)
+                    .encode(
+                        theta=alt.Theta("amount:Q"),
+                        color=alt.Color("sub_category:N", title="二级分类"),
+                        tooltip=["parent_category", "sub_category", alt.Tooltip("amount:Q", format=".2f")],
+                    )
+                    .properties(height=320)
+                )
+                labels = (
+                    alt.Chart(pie_source)
+                    .mark_text(radius=125, size=12)
+                    .encode(theta=alt.Theta("amount:Q"), text=alt.Text("amount:Q", format=".1f"))
+                )
+                st.altair_chart(pie + labels, use_container_width=True)
+
+            st.subheader("记录表格区")
+            st.dataframe(show_df, use_container_width=True, hide_index=True)
+
+            st.subheader("更改记录")
+            edit_df = show_df.sort_values(["expense_date", "id"], ascending=[False, False]).copy()
+            edit_df["label"] = (
+                "ID:"
+                + edit_df["id"].astype(str)
+                + " | "
+                + edit_df["expense_date"].astype(str)
+                + " | "
+                + edit_df["user_name"].astype(str)
+                + " | ¥"
+                + edit_df["amount"].map(lambda x: f"{x:,.2f}")
+            )
+            selected_label = st.selectbox("选择要更改的记录", edit_df["label"].tolist(), key="p1_edit_pick")
+            row = edit_df[edit_df["label"] == selected_label].iloc[0]
+
+            e1, e2, e3 = st.columns(3)
+            with e1:
+                new_amount = st.number_input("新金额", min_value=0.0, value=float(row["amount"]), step=1.0, key="p1_edit_amount")
+            with e2:
+                new_bill = st.selectbox("新账单类型", ["个人", "共同"], index=0 if row["bill_type"] == "个人" else 1, key="p1_edit_bill")
+            with e3:
+                cur_pay = row["payment_method"] if "payment_method" in row and row["payment_method"] in PAYMENT_METHODS else PAYMENT_METHODS[0]
+                new_payment = st.selectbox("新支付方式", PAYMENT_METHODS, index=PAYMENT_METHODS.index(cur_pay), key="p1_edit_pay")
+
+            ee1, ee2, ee3 = st.columns(3)
+            with ee1:
+                parent_index = FIXED_PARENT_CATEGORIES.index(row["parent_category"]) if row["parent_category"] in FIXED_PARENT_CATEGORIES else 0
+                new_parent = st.selectbox("新一级分类", FIXED_PARENT_CATEGORIES, index=parent_index, key="p1_edit_parent")
+            edit_sub_options = get_sub_options(categories_df, new_parent)
+            with ee2:
+                sub_index = edit_sub_options.index(row["sub_category"]) if (edit_sub_options and row["sub_category"] in edit_sub_options) else 0
+                new_sub = st.selectbox("新二级分类", edit_sub_options if edit_sub_options else [""], index=sub_index, key="p1_edit_sub")
+            with ee3:
+                new_note = st.text_input("新备注", value=str(row["note"]) if "note" in row else "", key="p1_edit_note")
+
+            if st.button("保存更改", use_container_width=True, key="p1_edit_save"):
+                payload = {
+                    "amount": float(new_amount),
+                    "bill_type": new_bill,
+                    "payment_method": new_payment,
+                    "parent_category": new_parent,
+                    "sub_category": new_sub,
+                    "note": new_note.strip(),
+                }
+                if new_payment != "信用卡":
+                    payload["card_name"] = ""
+                rr = update_expense_record(int(row["id"]), payload)
+                st.success("记录已更新") if rr == "ok" else st.error(rr)
+                if rr == "ok":
+                    st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
 with page2:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.subheader("现金流记录")
+    if cashflows_df.empty:
+        st.caption("提示：如果你还没创建 cashflows 表，这里会显示为空，不会影响记账页使用。")
     flow_types = ["paycheck流入", "直接支付支出流出", "信用卡到期还款流出"]
     f1, f2, f3, f4 = st.columns(4)
     with f1:
