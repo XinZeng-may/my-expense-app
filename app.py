@@ -242,6 +242,7 @@ def add_credit_card(card_name: str, owner_name: str, cashback_rate: float, payme
     except Exception as e:
         return f"保存信用卡失败：{e}"
 
+
 def update_credit_card(
     old_card_name: str,
     new_card_name: str,
@@ -264,15 +265,7 @@ def update_credit_card(
         return "cashback 不能小于 0。"
     if payment_due_day < 1 or payment_due_day > 31:
         return "每月还款日必须在 1 到 31 之间。"
-    if old_card_name != new_card_name:
-    supabase.table("expenses").update(
-        {"card_name": new_card_name}
-    ).eq("card_name", old_card_name).execute()
 
-    supabase.table("credit_card_cashback_rules").update(
-        {"card_name": new_card_name}
-    ).eq("card_name", old_card_name).execute()
-    
     try:
         # 如果改了卡名，先检查新卡名是否已存在
         if old_card_name != new_card_name:
@@ -286,7 +279,7 @@ def update_credit_card(
             if existing.data:
                 return "新的信用卡名称已存在。"
 
-        # 更新信用卡表
+        # 更新信用卡主表
         supabase.table("credit_cards").update(
             {
                 "card_name": new_card_name,
@@ -297,16 +290,20 @@ def update_credit_card(
             }
         ).eq("card_name", old_card_name).execute()
 
-        # 如果卡名改了，同步更新历史 expenses 里的 card_name
+        # 如果改了卡名，同步更新 expenses 和 cashback 规则表
         if old_card_name != new_card_name:
             supabase.table("expenses").update(
                 {"card_name": new_card_name}
             ).eq("card_name", old_card_name).execute()
 
+            supabase.table("credit_card_cashback_rules").update(
+                {"card_name": new_card_name}
+            ).eq("card_name", old_card_name).execute()
+
         return "ok"
+
     except Exception as e:
         return f"修改信用卡失败：{e}"
-
 
 def deactivate_credit_card(card_name: str) -> str:
     card_name = card_name.strip()
