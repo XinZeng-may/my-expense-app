@@ -577,46 +577,47 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
 tab1, tab2, tab3 = st.tabs(["📒 记账总览", "💵 现金流统计", "💳 信用卡管理"])
 
 with tab1:
-    st.subheader("📊 统计卡片")
+   st.subheader("📊 统计卡片")
 
-    if filtered_df.empty:
-        shared_amount = 0.0
-        personal_amount = 0.0
+if filtered_df.empty:
+    shared_amount = 0.0
+    personal_amount = 0.0
+    total_amount = 0.0
+    total_label = "总支出"
+else:
+    shared_amount = filtered_df[filtered_df["bill_type"] == "共同"]["amount"].sum()
+
+    if selected_user_filter == "全部":
+        personal_amount = filtered_df[filtered_df["bill_type"] == "个人"]["amount"].sum()
+        total_amount = personal_amount + shared_amount
+        total_label = "总支出(全部个人+全部共同)"
     else:
-        shared_amount = filtered_df[filtered_df["bill_type"] == "共同"]["amount"].sum()
+        personal_amount = filtered_df[
+            (filtered_df["user_name"] == selected_user_filter)
+            & (filtered_df["bill_type"] == "个人")
+        ]["amount"].sum()
+        total_amount = personal_amount + (shared_amount / 2)
+        total_label = "总支出(个人+共同/2)"
 
-        if selected_user_filter == "全部":
-            personal_amount = filtered_df[filtered_df["bill_type"] == "个人"]["amount"].sum()
-            total_amount = personal_amount + shared_amount
-            total_label = "总支出(全部个人+全部共同)"
-        else:
-            personal_amount = filtered_df[
-                (filtered_df["user_name"] == selected_user_filter)
-                & (filtered_df["bill_type"] == "个人")
-            ]["amount"].sum()
-            total_amount = personal_amount + (shared_amount / 2)
-            total_label = "总支出(个人+共同/2)"
+record_count = len(filtered_df)
 
-    record_count = len(filtered_df)
-
-    s1, s2, s3, s4 = st.columns(4)
-    s1.markdown(
-        f"<div class='stat-card'><div class='stat-label'>{total_label}</div><div class='stat-value'>¥{total_amount:,.2f}</div></div>",
-        unsafe_allow_html=True,
-    )
-    s2.markdown(
-        f"<div class='stat-card'><div class='stat-label'>个人支出</div><div class='stat-value'>¥{personal_amount:,.2f}</div></div>",
-        unsafe_allow_html=True,
-    )
-    s3.markdown(
-        f"<div class='stat-card'><div class='stat-label'>共同支出</div><div class='stat-value'>¥{shared_amount:,.2f}</div></div>",
-        unsafe_allow_html=True,
-    )
-    s4.markdown(
-        f"<div class='stat-card'><div class='stat-label'>记录数</div><div class='stat-value'>{record_count}</div></div>",
-        unsafe_allow_html=True,
-    )
-
+s1, s2, s3, s4 = st.columns(4)
+s1.markdown(
+    f"<div class='stat-card'><div class='stat-label'>{total_label}</div><div class='stat-value'>¥{total_amount:,.2f}</div></div>",
+    unsafe_allow_html=True,
+)
+s2.markdown(
+    f"<div class='stat-card'><div class='stat-label'>个人支出</div><div class='stat-value'>¥{personal_amount:,.2f}</div></div>",
+    unsafe_allow_html=True,
+)
+s3.markdown(
+    f"<div class='stat-card'><div class='stat-label'>共同支出</div><div class='stat-value'>¥{shared_amount:,.2f}</div></div>",
+    unsafe_allow_html=True,
+)
+s4.markdown(
+    f"<div class='stat-card'><div class='stat-label'>记录数</div><div class='stat-value'>{record_count}</div></div>",
+    unsafe_allow_html=True,
+)
     st.subheader("📁 分类汇总区")
     if filtered_df.empty:
         st.info("当前筛选条件下暂无数据。")
