@@ -441,24 +441,40 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
     ]
 
 st.subheader("📊 统计卡片")
-total_amount = filtered_df["amount"].sum() if not filtered_df.empty else 0.0
-personal_amount = (
-    filtered_df[filtered_df["bill_type"] == "个人"]["amount"].sum() if not filtered_df.empty else 0.0
-)
+
+# 共同支出：当前筛选条件下，bill_type=共同 的总和
 shared_amount = (
-    filtered_df[filtered_df["bill_type"] == "共同"]["amount"].sum() if not filtered_df.empty else 0.0
+    filtered_df[filtered_df["bill_type"] == "共同"]["amount"].sum()
+    if not filtered_df.empty else 0.0
 )
-personal_kpi_amount = personal_amount + (shared_amount / 2)
+
+# 个人支出：如果选了具体用户，只算该用户的个人账单；否则算全部用户个人账单总和
+if selected_user_filter != "全部":
+    personal_amount = (
+        filtered_df[
+            (filtered_df["user_name"] == selected_user_filter)
+            & (filtered_df["bill_type"] == "个人")
+        ]["amount"].sum()
+        if not filtered_df.empty else 0.0
+    )
+else:
+    personal_amount = (
+        filtered_df[filtered_df["bill_type"] == "个人"]["amount"].sum()
+        if not filtered_df.empty else 0.0
+    )
+
+# 你要的新逻辑：总支出 = 个人 + 共同/2
+total_amount = personal_amount + (shared_amount / 2)
+
 record_count = len(filtered_df)
-user_count = max(len(users_df), 1)
 
 s1, s2, s3, s4 = st.columns(4)
 s1.markdown(
-    f"<div class='stat-card'><div class='stat-label'>总支出</div><div class='stat-value'>¥{total_amount:,.2f}</div></div>",
+    f"<div class='stat-card'><div class='stat-label'>总支出(个人+共同/2)</div><div class='stat-value'>¥{total_amount:,.2f}</div></div>",
     unsafe_allow_html=True,
 )
 s2.markdown(
-    f"<div class='stat-card'><div class='stat-label'>个人支出(个人+共同/2)</div><div class='stat-value'>¥{personal_kpi_amount:,.2f}</div></div>",
+    f"<div class='stat-card'><div class='stat-label'>个人支出(仅个人账单)</div><div class='stat-value'>¥{personal_amount:,.2f}</div></div>",
     unsafe_allow_html=True,
 )
 s3.markdown(
