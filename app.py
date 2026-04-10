@@ -1323,53 +1323,53 @@ with tab1:
                         except Exception as e:
                             st.error(f"修改失败：{e}")
 with tab2:
-st.markdown("### 💳 手动记录信用卡还款")
-
-active_card_names = cards_df[cards_df["is_active"] == True]["card_name"].dropna().unique().tolist() if not cards_df.empty else []
-payer_options = ["共同"] + users_df["name"].dropna().unique().tolist() if not users_df.empty else ["共同"]
-
-with st.form("add_credit_card_payment_form", clear_on_submit=True):
-    rp1, rp2, rp3 = st.columns(3)
-    with rp1:
-        payment_date_value = st.date_input("还款日期", value=date.today(), key="repayment_date")
-    with rp2:
-        repayment_card_name = st.selectbox("信用卡", active_card_names, key="repayment_card")
-    with rp3:
-        repayment_amount = st.number_input("还款金额", min_value=0.0, step=10.0, format="%.2f", key="repayment_amount")
-
-    rp4, rp5 = st.columns(2)
-    with rp4:
-        repayment_payer = st.selectbox("还款人", payer_options, key="repayment_payer")
-    with rp5:
-        repayment_note = st.text_input("备注", key="repayment_note")
-
-    submitted_repayment = st.form_submit_button("保存还款记录", use_container_width=True)
-
-if submitted_repayment:
-    result = add_credit_card_payment(
-        payment_date_value,
-        repayment_card_name,
-        float(repayment_amount),
-        repayment_payer,
-        repayment_note,
-    )
-    if result == "ok":
-        st.success("信用卡还款记录已保存。")
-        st.rerun()
-    else:
-        st.error(result)
-        
-    st.subheader("💵 现金流统计")
-    st.caption("逻辑：现金/借记卡当天流出；信用卡按还款日自动计入现金流；paycheck 按规则自动生成。")
-
-    # 日期区间
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        range_start = pd.to_datetime(date_range[0]).date()
-        range_end = pd.to_datetime(date_range[1]).date()
-    else:
-        today = date.today()
-        range_start = today.replace(day=1)
-        range_end = today
+    st.markdown("### 💳 手动记录信用卡还款")
+    
+    active_card_names = cards_df[cards_df["is_active"] == True]["card_name"].dropna().unique().tolist() if not cards_df.empty else []
+    payer_options = ["共同"] + users_df["name"].dropna().unique().tolist() if not users_df.empty else ["共同"]
+    
+    with st.form("add_credit_card_payment_form", clear_on_submit=True):
+        rp1, rp2, rp3 = st.columns(3)
+        with rp1:
+            payment_date_value = st.date_input("还款日期", value=date.today(), key="repayment_date")
+        with rp2:
+            repayment_card_name = st.selectbox("信用卡", active_card_names, key="repayment_card")
+        with rp3:
+            repayment_amount = st.number_input("还款金额", min_value=0.0, step=10.0, format="%.2f", key="repayment_amount")
+    
+        rp4, rp5 = st.columns(2)
+        with rp4:
+            repayment_payer = st.selectbox("还款人", payer_options, key="repayment_payer")
+        with rp5:
+            repayment_note = st.text_input("备注", key="repayment_note")
+    
+        submitted_repayment = st.form_submit_button("保存还款记录", use_container_width=True)
+    
+    if submitted_repayment:
+        result = add_credit_card_payment(
+            payment_date_value,
+            repayment_card_name,
+            float(repayment_amount),
+            repayment_payer,
+            repayment_note,
+        )
+        if result == "ok":
+            st.success("信用卡还款记录已保存。")
+            st.rerun()
+        else:
+            st.error(result)
+            
+        st.subheader("💵 现金流统计")
+        st.caption("逻辑：现金/借记卡当天流出；信用卡按还款日自动计入现金流；paycheck 按规则自动生成。")
+    
+        # 日期区间
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            range_start = pd.to_datetime(date_range[0]).date()
+            range_end = pd.to_datetime(date_range[1]).date()
+        else:
+            today = date.today()
+            range_start = today.replace(day=1)
+            range_end = today
 
     # ===== 现金流入规则管理 =====
     st.markdown("### 💰 现金流入规则（Paycheck）")
