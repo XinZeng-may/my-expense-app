@@ -88,7 +88,79 @@ def load_credit_cards() -> pd.DataFrame:
         return pd.DataFrame(response.data or [])
     except Exception:
         return pd.DataFrame()
+def load_cashback_rules() -> pd.DataFrame:
+    try:
+        response = (
+            supabase.table("credit_card_cashback_rules")
+            .select("*")
+            .order("card_name")
+            .order("category_name")
+            .execute()
+        )
+        return pd.DataFrame(response.data or [])
+    except Exception:
+        return pd.DataFrame()
 
+
+def ensure_cashback_rule_columns(df: pd.DataFrame) -> pd.DataFrame:
+    expected_defaults = {
+        "id": 0,
+        "card_name": "",
+        "category_name": "",
+        "cashback_rate": 0.0,
+        "created_at": "",
+    }
+
+    normalized = df.copy()
+    for col, default in expected_defaults.items():
+        if col not in normalized.columns:
+            normalized[col] = default
+
+    normalized["id"] = pd.to_numeric(normalized["id"], errors="coerce").fillna(0).astype(int)
+    normalized["card_name"] = normalized["card_name"].fillna("").astype(str)
+    normalized["category_name"] = normalized["category_name"].fillna("").astype(str)
+    normalized["cashback_rate"] = pd.to_numeric(normalized["cashback_rate"], errors="coerce").fillna(0.0)
+
+    return normalized
+
+
+def save_cashback_rule(card_name: str, category_name: str, cashback_rate: float) -> str:
+    card_name = card_name.strip()
+    category_name = category_name.strip()
+
+    if not card_name:
+        return "信用卡不能为空。"
+    if not category_name:
+        return "分类不能为空。"
+    if cashback_rate < 0:
+        return "cashback 不能小于 0。"
+
+    try:
+        existing = (
+            supabase.table("credit_card_cashback_rules")
+            .select("id")
+            .eq("card_name", card_name)
+            .eq("category_name", category_name)
+            .limit(1)
+            .execute()
+        )
+
+        if existing.data:
+            supabase.table("credit_card_cashback_rules").update(
+                {"cashback_rate": float(cashback_rate)}
+            ).eq("card_name", card_name).eq("category_name", category_name).execute()
+            return "updated"
+        else:
+            supabase.table("credit_card_cashback_rules").insert(
+                {
+                    "card_name": card_name,
+                    "category_name": category_name,
+                    "cashback_rate": float(cashback_rate),
+                }
+            ).execute()
+            return "ok"
+    except Exception as e:
+        return f"保存返现规则失败：{e}"
 
 def add_user(name: str) -> str:
     cleaned = name.strip()
@@ -192,7 +264,15 @@ def update_credit_card(
         return "cashback 不能小于 0。"
     if payment_due_day < 1 or payment_due_day > 31:
         return "每月还款日必须在 1 到 31 之间。"
+    if old_card_name != new_card_name:
+    supabase.table("expenses").update(
+        {"card_name": new_card_name}
+    ).eq("card_name", old_card_name).execute()
 
+    supabase.table("credit_card_cashback_rules").update(
+        {"card_name": new_card_name}
+    ).eq("card_name", old_card_name).execute()
+    
     try:
         # 如果改了卡名，先检查新卡名是否已存在
         if old_card_name != new_card_name:
@@ -397,7 +477,7 @@ users_df = load_users()
 categories_df = load_categories()
 expenses_df = load_expenses()
 cards_df = ensure_credit_card_columns(load_credit_cards())
-
+cashback_rules_df = ensure_cashback_rule_columns(load_cashback_rules())
 st.markdown(
     """
 <div class='top-banner'>
@@ -975,44 +1055,60 @@ with tab2:
         if credit_outstanding_df.empty:
             st.info("当前没有信用卡待还记录。")
         else:
-            credit_bill_summary = (
-                credit_outstanding_df.groupby("card_name", as_index=False)["adjusted_amount"]
-                .sum()
-                .sort_values("adjusted_amount", ascending=False)
-                .rename(columns={"card_name": "信用卡", "adjusted_amount": "当前待还金额"})
+            # 合并信用卡基础信息（默认返现、属于谁、还款日）
+            if not cards_df.empty:
+                credit_outstanding_df = credit_outstanding_df.merge(
+                    cards_df[["card_name", "owner_name", "payment_due_day", "cashback_rate"]],
+                    on="card_name",
+                    how="left"
+                )
+            else:
+                credit_outstanding_df["owner_name"] = ""
+                credit_outstanding_df["payment_due_day"] = None
+                credit_outstanding_df["cashback_rate"] = 0.0
+
+            # 建立规则映射： (卡名, 一级分类) -> 返现比例
+            rule_map = {}
+            if not cashback_rules_df.empty:
+                for _, row in cashback_rules_df.iterrows():
+                    rule_map[(str(row["card_name"]), str(row["category_name"]))] = float(row["cashback_rate"])
+
+            # 逐笔计算实际适用返现比例
+            def get_effective_cashback_rate(row):
+                key = (str(row["card_name"]), str(row["parent_category"]))
+                if key in rule_map:
+                    return rule_map[key]
+                return float(row["cashback_rate"]) if pd.notna(row["cashback_rate"]) else 0.0
+
+            credit_outstanding_df["effective_cashback_rate"] = credit_outstanding_df.apply(
+                get_effective_cashback_rate,
+                axis=1
             )
 
-            if not cards_df.empty:
-                credit_bill_summary = credit_bill_summary.merge(
-                    cards_df[["card_name", "owner_name", "payment_due_day", "cashback_rate"]],
-                    left_on="信用卡",
-                    right_on="card_name",
-                    how="left",
-                )
+            credit_outstanding_df["预计cashback"] = (
+                credit_outstanding_df["adjusted_amount"] * credit_outstanding_df["effective_cashback_rate"]
+            )
 
-                credit_bill_summary["预计cashback"] = (
-                    credit_bill_summary["当前待还金额"] * credit_bill_summary["cashback_rate"].fillna(0)
+            credit_bill_summary = (
+                credit_outstanding_df.groupby("card_name", as_index=False)
+                .agg(
+                    当前待还金额=("adjusted_amount", "sum"),
+                    属于谁=("owner_name", "first"),
+                    每月还款日=("payment_due_day", "first"),
+                    预计cashback=("预计cashback", "sum"),
                 )
-
-                credit_bill_summary = credit_bill_summary.rename(
-                    columns={
-                        "owner_name": "属于谁",
-                        "payment_due_day": "每月还款日",
-                        "cashback_rate": "cashback比例",
-                    }
-                )
-
-                credit_bill_summary = credit_bill_summary[
-                    ["信用卡", "当前待还金额", "属于谁", "每月还款日", "cashback比例", "预计cashback"]
-                ]
+                .sort_values("当前待还金额", ascending=False)
+                .rename(columns={"card_name": "信用卡"})
+            )
 
             st.dataframe(credit_bill_summary, use_container_width=True, hide_index=True)
-
 
 with tab3:
     st.subheader("💳 信用卡管理")
 
     latest_cards_df = ensure_credit_card_columns(load_credit_cards())
+    latest_rules_df = ensure_cashback_rule_columns(load_cashback_rules())
+
     owner_options = ["共同"] + users_df["name"].dropna().unique().tolist() if not users_df.empty else ["共同"]
 
     st.markdown("### 添加信用卡")
@@ -1022,7 +1118,12 @@ with tab3:
             new_card_name = st.text_input("信用卡名称", placeholder="例如：Rogers")
             new_owner_name = st.selectbox("属于谁", owner_options)
         with c2:
-            new_cashback_rate = st.number_input("cashback 比例", min_value=0.0, step=0.005, format="%.3f")
+            new_cashback_rate = st.number_input(
+                "默认 cashback 比例（未单独设置分类时使用）",
+                min_value=0.0,
+                step=0.005,
+                format="%.3f"
+            )
             new_payment_due_day = st.number_input("每月还款日", min_value=1, max_value=31, step=1)
 
         submitted_card = st.form_submit_button("保存信用卡", use_container_width=True)
@@ -1040,91 +1141,44 @@ with tab3:
         else:
             st.warning(result)
 
-    st.markdown("### 修改信用卡")
+    st.markdown("### 添加 / 更新 cashback 规则（按一级分类）")
+
     active_cards_df = latest_cards_df[latest_cards_df["is_active"] == True].copy() if not latest_cards_df.empty else pd.DataFrame()
+    active_card_names = active_cards_df["card_name"].dropna().unique().tolist() if not active_cards_df.empty else []
 
-    if active_cards_df.empty:
-        st.info("当前没有可修改的启用中信用卡。")
+    if not active_card_names:
+        st.info("请先添加并启用至少一张信用卡。")
     else:
-        edit_card_pick = st.selectbox(
-            "选择要修改的信用卡",
-            active_cards_df["card_name"].tolist(),
-            key="edit_credit_card_pick",
-        )
-
-        edit_card_row = active_cards_df[active_cards_df["card_name"] == edit_card_pick].iloc[0]
-
-        with st.form("edit_credit_card_form"):
-            e1, e2 = st.columns(2)
-            with e1:
-                edited_card_name = st.text_input("新信用卡名称", value=str(edit_card_row["card_name"]))
-                owner_index = owner_options.index(str(edit_card_row["owner_name"])) if str(edit_card_row["owner_name"]) in owner_options else 0
-                edited_owner_name = st.selectbox("新属于谁", owner_options, index=owner_index)
-            with e2:
-                edited_cashback_rate = st.number_input(
-                    "新 cashback 比例",
+        with st.form("add_cashback_rule_form", clear_on_submit=True):
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                rule_card_name = st.selectbox("信用卡", active_card_names)
+            with r2:
+                rule_category_name = st.selectbox("一级分类", FIXED_PARENT_CATEGORIES)
+            with r3:
+                rule_cashback_rate = st.number_input(
+                    "该分类 cashback 比例",
                     min_value=0.0,
-                    value=float(edit_card_row["cashback_rate"]),
                     step=0.005,
-                    format="%.3f",
-                )
-                current_due_day = int(edit_card_row["payment_due_day"]) if pd.notna(edit_card_row["payment_due_day"]) else 1
-                edited_payment_due_day = st.number_input(
-                    "新每月还款日",
-                    min_value=1,
-                    max_value=31,
-                    value=current_due_day,
-                    step=1,
+                    format="%.3f"
                 )
 
-            edited_is_active = st.checkbox(
-                "启用中",
-                value=bool(edit_card_row["is_active"]),
+            submitted_rule = st.form_submit_button("保存 cashback 规则", use_container_width=True)
+
+        if submitted_rule:
+            result = save_cashback_rule(
+                rule_card_name,
+                rule_category_name,
+                float(rule_cashback_rate),
             )
-
-            confirm_edit_card = st.checkbox("我确认要修改这张信用卡", value=False)
-            submitted_edit_card = st.form_submit_button("保存信用卡修改", use_container_width=True)
-
-        if submitted_edit_card:
-            if not confirm_edit_card:
-                st.warning("请先勾选确认修改。")
+            if result == "ok":
+                st.success("cashback 规则已添加。")
+                st.rerun()
+            elif result == "updated":
+                st.success("cashback 规则已更新。")
+                st.rerun()
             else:
-                result = update_credit_card(
-                    old_card_name=str(edit_card_row["card_name"]),
-                    new_card_name=edited_card_name,
-                    owner_name=edited_owner_name,
-                    cashback_rate=float(edited_cashback_rate),
-                    payment_due_day=int(edited_payment_due_day),
-                    is_active=bool(edited_is_active),
-                )
-                if result == "ok":
-                    st.success("信用卡已修改。")
-                    st.rerun()
-                else:
-                    st.error(result)
-
-    st.markdown("### 停用信用卡")
-    if active_cards_df.empty:
-        st.info("当前没有可停用的启用中信用卡。")
-    else:
-        deactivate_card_pick = st.selectbox(
-            "选择要停用的信用卡",
-            active_cards_df["card_name"].tolist(),
-            key="deactivate_credit_card_pick",
-        )
-
-        confirm_deactivate = st.checkbox("我确认要停用这张信用卡", value=False, key="confirm_deactivate_card")
-
-        if st.button("停用信用卡", use_container_width=True, key="deactivate_credit_card_btn"):
-            if not confirm_deactivate:
-                st.warning("请先勾选确认停用。")
-            else:
-                result = deactivate_credit_card(deactivate_card_pick)
-                if result == "ok":
-                    st.success("信用卡已停用。停用后不会再出现在 Tab1 的可选信用卡里，但历史记录仍会保留。")
-                    st.rerun()
-                else:
-                    st.error(result)
+                st.error(result)
 
     st.markdown("### 已保存的信用卡")
     if latest_cards_df.empty:
@@ -1134,10 +1188,24 @@ with tab3:
             columns={
                 "card_name": "卡名",
                 "owner_name": "属于谁",
-                "cashback_rate": "cashback比例",
-                "payment_due_day": "还款日",
+                "cashback_rate": "默认cashback比例",
+                "payment_due_day": "每月还款日",
                 "is_active": "启用中",
                 "created_at": "创建时间",
             }
         )
         st.dataframe(show_cards_df, use_container_width=True, hide_index=True)
+
+    st.markdown("### 已保存的 cashback 规则")
+    if latest_rules_df.empty:
+        st.info("还没有分类返现规则。")
+    else:
+        show_rules_df = latest_rules_df.rename(
+            columns={
+                "card_name": "卡名",
+                "category_name": "一级分类",
+                "cashback_rate": "cashback比例",
+                "created_at": "创建时间",
+            }
+        )
+        st.dataframe(show_rules_df, use_container_width=True, hide_index=True)
