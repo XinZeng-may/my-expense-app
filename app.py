@@ -13,39 +13,110 @@ PAYMENT_METHODS = ["现金/借记卡", "信用卡", "其他"]
 st.markdown(
     """
 <style>
-.main { background: #f6f8fc; }
-.block-container { padding-top: 1.2rem; padding-bottom: 1.4rem; }
+.main {
+    background: #f6f8fc;
+}
+
+.block-container {
+    padding-top: 0.6rem;
+    padding-bottom: 1.2rem;
+    max-width: 1400px;
+}
+
 .top-banner {
     background: linear-gradient(135deg, #ffffff 0%, #f1f7ff 100%);
     border: 1px solid #e3eaf5;
-    border-radius: 16px;
-    padding: 18px;
-    margin-bottom: 14px;
+    border-radius: 14px;
+    padding: 14px 18px;
+    margin-bottom: 10px;
 }
-.top-title { margin: 0; color: #0f172a; font-size: 30px; font-weight: 800; }
-.top-subtitle { margin: 6px 0 0 0; color: #475569; font-size: 14px; }
+
+.top-title {
+    margin: 0;
+    color: #0f172a;
+    font-size: 24px;
+    font-weight: 800;
+    line-height: 1.2;
+}
+
+.top-subtitle {
+    margin: 4px 0 0 0;
+    color: #64748b;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
 .panel {
     background: #ffffff;
     border: 1px solid #e5eaf3;
-    border-radius: 16px;
-    padding: 16px;
-    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
-    margin-bottom: 14px;
+    border-radius: 14px;
+    padding: 14px;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+    margin-bottom: 12px;
 }
+
 .stat-card {
     background: #ffffff;
     border: 1px solid #e5eaf3;
     border-radius: 14px;
-    padding: 12px 14px;
-    box-shadow: 0 6px 16px rgba(15, 23, 42, 0.05);
+    padding: 10px 14px;
+    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
+    min-height: 84px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
 }
-.stat-label { color: #64748b; font-size: 12px; }
-.stat-value { color: #0f172a; font-size: 23px; font-weight: 700; }
+
+.stat-label {
+    color: #64748b;
+    font-size: 12px;
+    margin-bottom: 4px;
+}
+
+.stat-value {
+    color: #0f172a;
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.small-note {
+    color: #64748b;
+    font-size: 12px;
+    margin-top: 2px;
+}
+
+div[data-testid="stDataFrame"] {
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid #e5eaf3;
+}
+
+div[data-testid="stMetric"] {
+    background: white;
+    border: 1px solid #e5eaf3;
+    border-radius: 12px;
+    padding: 10px 12px;
+}
+
+h1, h2, h3 {
+    color: #0f172a;
+    margin-top: 0.4rem;
+    margin-bottom: 0.7rem;
+}
+
+hr {
+    margin-top: 1rem;
+    margin-bottom: 1rem;
+}
+
+section[data-testid="stSidebar"] > div {
+    padding-top: 0.8rem;
+}
 </style>
 """,
     unsafe_allow_html=True,
 )
-
 
 @st.cache_resource
 def init_supabase() -> Client:
